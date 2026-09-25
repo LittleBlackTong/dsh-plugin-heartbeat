@@ -5,6 +5,8 @@
  */
 import { test, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { apply, Config, name, inject, CONFIG_ROUTE_PATH } from '../lib/index.js'
 import { SettingsSchema } from '../lib/schema.js'
 import { HeartbeatRuntime, buildHeartbeatMessage, clampIntervalSeconds, buildSchedule } from '../lib/runtime.js'
@@ -144,8 +146,9 @@ test('renderPrompt substitutes {{time}}', () => {
 test('buildHeartbeatMessage has the harness shape', () => {
   const message = buildHeartbeatMessage('hi')
   assert.equal(message.role, 'user')
-  assert.equal(message.source.kind, 'plugin')
-  assert.equal(message.source.plugin, 'heartbeat')
+  // Session format v4 refuses the retired `plugin` wrapper: third-party
+  // producers must use a producer-owned kind (`plugin:<name>`).
+  assert.equal(message.source.kind, 'plugin:heartbeat')
   assert.deepEqual(message.content, [{ type: 'text', text: 'hi' }])
   assert.match(message.id, /^hb-/)
 })
@@ -167,7 +170,7 @@ test('idle tick opens a turn via followup', () => {
   assert.equal(agent.followed.length, 1)
   const message = agent.followed[0]
   assert.equal(message.role, 'user')
-  assert.equal(message.source.kind, 'plugin')
+  assert.equal(message.source.kind, 'plugin:heartbeat')
   assert.match(message.content[0].text, /beat /)
 })
 
@@ -245,7 +248,7 @@ test('non-user inbox messages do not reset the guard', () => {
   agent.inbox.claim('next-turn')
   runtime.tick()
   agent.inbox.claim('next-turn')
-  agent.emitInserted({ id: 'hb-1', source: { kind: 'plugin', plugin: 'heartbeat' } })
+  agent.emitInserted({ id: 'hb-1', source: { kind: 'plugin:heartbeat' } })
   runtime.tick() // still trips despite the plugin message
   assert.equal(runtime.paused, true)
   assert.equal(agent.followed.length, 2)
@@ -366,7 +369,7 @@ test('apply attaches a runtime to each root agent and cleans up', async () => {
     },
     inject: () => {},
   }
-  const dispose = apply(ctx, { intervalSeconds: 600 })
+  const dispose = apply(ctx, { intervalSeconds: 600, configFile: join(tmpdir(), `hb-iso-${Date.now()}.json`) })
 
   const agent = new FakeAgent('root-1')
   registry.add(agent)
@@ -404,7 +407,7 @@ test('apply registers the config route on the web server', () => {
     effect: () => () => {},
     inject: (deps, callback) => injected.push({ deps, callback }),
   }
-  const dispose = apply(ctx, { intervalSeconds: 900 })
+  const dispose = apply(ctx, { intervalSeconds: 900, configFile: join(tmpdir(), `hb-iso-route-${Date.now()}.json`) })
   const web = injected.find(({ deps }) => deps[0] === 'webServer')
   assert.ok(web, 'webServer injection registered')
   const { deps, callback } = web
@@ -485,11 +488,11 @@ test('config route: GET serves the store, POST updates it, bad input rejects', a
 
   const initial = await get()
   assert.equal(initial.status, 200)
-  assert.deepEqual(JSON.parse(initial.body), { enabled: true, intervalSeconds: 900, pauseAfterMissed: 3 })
+  assert.deepEqual(JSON.parse(initial.body), { enabled: true, intervalSeconds: 900, pauseAfterMissed: 3, report: { enabled: false, retention: 200 } })
 
   const updated = await post(JSON.stringify({ intervalSeconds: 120 }))
   assert.equal(updated.status, 200)
-  assert.deepEqual(JSON.parse(updated.body), { enabled: true, intervalSeconds: 120, pauseAfterMissed: 3 })
+  assert.deepEqual(JSON.parse(updated.body), { enabled: true, intervalSeconds: 120, pauseAfterMissed: 3, report: { enabled: false, retention: 200 } })
 
   const bad = await post(JSON.stringify({ intervalSeconds: 1 }))
   assert.equal(bad.status, 400)

@@ -45,6 +45,55 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 | `maxBeatsPerHour` | `0` | 每 60 分钟滑动窗口的心跳上限（`0`=关闭，仅 composition） |
 | `prompt` | 内置 | 每拍投递的指令模板，`{{time}}` 会替换为当前时间（仅 composition 配置） |
 | `configFile` | `<dshHome>/heartbeat.json` | 用户配置文件路径（`enabled` / `intervalSeconds` / `pauseAfterMissed`） |
+| `report` | `{enabled:false}` | 心跳汇总引擎（模式 B），见下 |
+
+## 心跳汇总引擎（模式 B，本地扩展 2026-09-25）
+
+默认每个会话各自回答自己的心跳（模式 A）。开启 `report.enabled` 后进入**报告模式**：
+
+- **来源会话静默**：不注入消息、不唤醒、**0 模型 token**——状态是从会话日志里机械抄录的；
+- 一个引擎按四段管道运行：采集(机械摘要) → 判定(机械规则 + **仅疑似异常时**一次模型调用)
+  → 分发(报告条目/三色状态旗/策略唤醒) → 记账(无人应答硬停·退避·每小时上限)；
+- 报告内嵌在 **设置 →「心跳 Heartbeat」页底部**（另有独立页）：🟢 正常 / 🔵 需决策 / 🟡 异常；
+  **默认折叠**，出现黄点或蓝点自动展开最近 5 条，手动折叠后保持折叠；不弹窗；
+- 点击「心跳报告」标题 → 在资源管理器/Finder 中打开完整 `.md` 报告
+  （`<dshHome>/heartbeat-report.md`，每拍重写）；
+- 统计口径为**窗口式**：只统计"自上次汇报以来"新增的工具错误与轮次结局
+  （游标持久化，重启后也不会把历史错误当成新异常）；待决策为状态语义，未答复前一直显示蓝点；
+- 「无人应答硬停」保留：连续 N 拍无任何真人活动 → 拆定时器，任意真人消息或打开报告页即可恢复；
+- 判级模型可在设置页选择：默认跟随 Harness 默认模型，列表标注**最便宜（推荐）**。
+
+```yaml
+# 不带 insert 的 id 覆盖条目（bundle 层已 insert）
+- id: dsh-heartbeat
+  config:
+    report:
+      enabled: true
+      retention: 200                  # 报告保留条数（10–1000）
+      judgment:
+        enabled: true                 # 疑似异常时用模型判级
+        model:                        # 可选：固定判级模型（默认 = Harness 默认模型）
+          provider: deepseek-official
+          model: deepseek-flash
+      strategies:                     # 跟随心跳节奏的策略（0 token 传感器）
+        - id: watch-tokens
+          label: 监控 tokens.json
+          every: 1                    # 每 N 拍评估一次
+          level: warn                 # 命中时的状态旗颜色 info|warn|decide
+          message: tokens.json 被改动
+          sensor:
+            kind: file
+            path: C:\work\design\tokens.json
+            mode: changed              # changed | exists | missing
+          wake:                       # 可选：命中时唤醒指定会话处理
+            sessionId: session-xxxx
+          wakePrompt: tokens.json 变了，复核一下
+```
+
+机制要点：报告引擎用 `ctx.sessions.list()` + `Session.ownEvents()` 抄录摘要
+（最近用户/助手文本、turn 结果、工具错误数、空闲时长）；模型判定走 `ctx.llm.stream`
+（不建会话），价格表来自人工核对的 USD/1M 表（`lib/model-pricing.js`，仅用于排序推荐）。
+每个拍点广播 `heartbeat/beat` 事件，供其它策略插件跟随节奏。
 
 自定义心跳提示词（composition 配置，**不带 `insert`**，避免与 bundle 层重复）：
 
@@ -65,7 +114,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 ## 开发
 
 ```sh
-node --test test/runtime.test.mjs
+node --test
 ```
 
 ## 已知边界
@@ -76,6 +125,7 @@ node --test test/runtime.test.mjs
 - 心跳是「汇报」不是「新任务」：默认提示词要求它别自作主张开新活。
 - 硬停前已排队的一条心跳（agent 忙时）会在当前轮结束时被消费——此后绝无新拍。
 - 与 dsh-plugin-memory 互相独立、零依赖；两者同时安装时消息在同一个 inbox 队列里排队，不冲突。
+- （报告模式，模式 B）摘要覆盖所有 live **根**会话（**子代理会话跳过**，与模式 A 的"子 agent 不挂心跳"一致），无会话内排队——引擎统一计时、永不触碰会话；报告历史与汇报游标持久化在 `<dshHome>/heartbeat-reports.json`。
 
 ## License
 

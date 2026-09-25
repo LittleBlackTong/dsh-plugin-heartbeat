@@ -2,6 +2,37 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.5.0] - 2026-09-25
+
+### Added
+
+- **报告模式（mode B，`report.enabled`，默认关）**：来源会话静默（不注入、不唤醒、0 模型 token），
+  一个引擎按「采集(机械摘要) → 判定(规则 + 仅疑似异常时一次模型调用) → 分发(报告条目/三色状态旗/策略唤醒)
+  → 记账(无人应答硬停·退避·每小时上限)」四段管道运行；`heartbeat/beat` 事件每拍广播。
+- **三色状态旗**：🟢 正常 / 🔵 需决策（检测 `ask_user_question`）/ 🟡 异常；**默认折叠**，
+  出现黄/蓝点自动展开最近 5 条，用户手动折叠后保持折叠；会话修好后（最新一条变绿）旗帜自动回绿。
+- **窗口式统计**：工具错误与轮次结局只统计"自上次汇报以来"（游标持久化进报告文件，
+  重启后不会把历史错误当成新异常）；待决策为状态语义（未答复前一直蓝）。
+- **内嵌报告区块 + 独立页**：设置 →「心跳 Heartbeat」页底部即报告列表；另有「心跳报告」独立页；
+  点击标题在资源管理器/Finder 打开 `.md` 完整报告（每拍重写 `<dshHome>/heartbeat-report.md`）。
+- **判级模型可配置**：设置页下拉选择，默认跟随 Harness 默认模型；列表按内置 USD 价表标注
+  **最便宜（推荐）**（`lib/model-pricing.js`，仅用于排序推荐）。
+- **跟随心跳的策略**（`report.strategies`）：文件传感器 `changed`（首拍记基线、改动才报）/
+  `exists` / `missing`；命中写报告条目（可指定状态旗颜色 info|warn|decide），可选**唤醒指定会话**处理。
+- **硬停在报告模式下保留**：连续 N 拍无任何真人活动（任意会话的用户消息 / 打开报告页）→ 拆定时器；
+  任意真人活动恢复。异常未解决时同一状态行**原地刷新**（时间戳前移），不刷屏。
+- 报告保留条数运行期生效（`setRetention` 即时裁剪）。
+- 子代理会话不参与报告（尊重"子 agent 不挂心跳"边界）。
+- 新测试：`test/report-engine.test.mjs`；总测试 48 项全绿。
+
+### Fixed
+
+- **适配会话格式 v4**：心跳消息的 `source.kind` 从已废弃的 `plugin` 改为 producer-owned
+  `plugin:heartbeat` —— 旧写法在 v4 下整轮被拒（`format v4 message requires a producer-owned source kind`）。
+- 配置部分更新不再丢弃 `report` 子字段（深合并）。
+- 容忍配置/报告文件中的 UTF-8 BOM（PowerShell `Set-Content -Encoding UTF8` 会写入）。
+- 测试命令由 `node --test test/` 改为 `node --test`（Node 22 下目录参数报 MODULE_NOT_FOUND）。
+
 ## [0.4.2] - 2026-08-31
 
 ### Changed
