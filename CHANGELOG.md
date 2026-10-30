@@ -2,6 +2,22 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.6.2] - 2026-10-30
+
+### Fixed
+
+- **投影读法错误：`stateOf()` 返回的是原始 state，不是 wire view（真机 bug，0.6.1 的守卫因此全坏）**：`sessionProjections.stateOf()` 给的是**原始 state**——普通会话的 `subagent` 原始 state 是 `{}`（不是 `null`），`subagentCatalog` 原始 state 是 `{ inheritedEventCount, head }`（不是数组）。0.6.1 把原始 state 直接当 wire view 用，导致：
+  - ① **身份守卫误判**：`{}` 被判为 truthy → 所有会话都被当成「子会话」→ **心跳根本挂不上**（运行实例 `/api/heartbeat/status` 返回 `sessions: []` 就是这个）；
+  - ② **child-active 闸门永远失效**：catalog 不是数组 → 永远检测不到子任务在运行 → 「子任务进行中保持静默」实际没生效。
+  - **修法**：新增 `sessionWireOf()`——优先 `projections.snapshot(session, [key]).values[key]` 拿 wire view，退化时用 raw state 并**校验形状**；`subagentIdentityOf()` 校验 `mode` / `identity` 形状（`{}` 不算子会话）；`childWorkActiveOf()` 改写成用 wire view 的 catalog / team members + 活 agent registry 判断运行中。
+- **0.6.1 已在 npm 且含此缺陷——请升级到 0.6.2。**
+
+### Tests
+
+- 新增 `test/projections-wire.test.mjs`（7 条）：wire 优先 / raw 回退、raw `{}` 不算子会话、身份识别、catalog + registry、team members、降级安全。
+- 修正 wiring 测试的假投影为**真实 raw 形状**，并补「raw `{}` 仍能挂载」回归用例。
+- 全量单测 **129/129 通过**（`node --test`）。
+
 ## [0.6.1] - 2026-10-30
 
 ### Fixed

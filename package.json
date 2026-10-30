@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-heartbeat",
   "description": "Autonomic heartbeat for DeepSeek Harness: silent pulses diff the session's todos / team board / goal, then speaks only on a signal (report / ask / escalate) with dedupe, quiet hours and a daily budget; carries a heart mark in the settings sidebar.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

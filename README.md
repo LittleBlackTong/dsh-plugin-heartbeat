@@ -161,6 +161,7 @@ The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `str
 - **DSH: official 0.2.1-rc.5 series.** `package.json` declares `engines.dsh: "^0.2.1-rc.5"`; the host gates with semver (`includePrerelease: true`), so mind prerelease semantics: `^0.2.1` / `>=0.2.0` **do not match** `0.2.1-rc.5`; only `^0.2.1-rc.5` does. It also covers the eventual 0.2.1 stable, while `0.3.0-rc.1` is judged incompatible.
 - **session format v4** (official 0.1.7+). The heartbeat source uses the producer-owned kind `plugin:heartbeat`; v4's native admission rejects the v3 `{kind:'plugin', plugin:'heartbeat'}` wrapper. The v4 and v3 allowlists are mutually exclusive.
 - **0.4.2 is the last v3-compatible version**; **from 0.5.0 the plugin supports only the official DSH 0.2.1-rc.5 series**. 0.3.x is not supported yet.
+- **Use 0.6.2 or later**: the published 0.6.1 misreads session projections — `stateOf()` returns raw state, so the `subagent` identity `{}` was treated as "this is a subagent" and **no heartbeat attached at all**, while the child-active gate never fired. 0.6.2 reads the wire view first and validates shapes; upgrade.
 - **Verified on a real host** (DSH Desktop 0.2.1-rc.5, v0.6.0 build loaded after restart):
   - `GET /api/heartbeat/status` → 200 with both live sessions (`sessionId` / `cwd` / `nextBeatAt` / budget / history), and `/api/heartbeat/config` returns the **v2** config;
   - an existing v1 `heartbeat.json` was migrated automatically (`intervalSeconds` → `baseIntervalSeconds`, plus the new mode / quiet-hours / budget fields) and `heartbeat-vitals.json` was created;
@@ -168,7 +169,7 @@ The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `str
   - **hot-plug**: `dsh plugin remove` while running turned `/status` from 200 into 401 (route gone, no crash), and `add` brought it back to 200 with the session restored;
   - **control route**: an unknown action returns 400, `snooze` sets `snoozeUntil`, `reset` clears it;
   - the sidebar heart and the `Heartbeat` section render correctly.
-  **Not separately verified on a live host** (unit tests only): event-driven latency (≤10 s), pre-beat compaction, and a real L2 question delivery. The v0.6 autonomy layer is covered by the 122-test suite.
+  **Not separately verified on a live host** (unit tests only): event-driven latency (≤10 s), pre-beat compaction, and a real L2 question delivery. The v0.6 autonomy layer is covered by the 129-test suite.
 
 ## Configuration (v2)
 
@@ -219,7 +220,7 @@ Custom heartbeat prompt (composition config, **no `insert`**, to avoid duplicati
 node --test
 ```
 
-No-arg `node --test` discovers `test/*.test.mjs`; the suite covers `runtime`, `tasks`, `sensors`, `rhythm`, `gate`, `vitals`, `config-store-v2`, `prompt-levels`, `wiring-v06`, `settings-nav-icon` and `client-half` — **122 tests** at the moment.
+No-arg `node --test` discovers `test/*.test.mjs`; the suite covers `runtime`, `tasks`, `sensors`, `rhythm`, `gate`, `vitals`, `config-store-v2`, `prompt-levels`, `wiring-v06`, `settings-nav-icon` and `client-half` — **129 tests** at the moment.
 
 Design and implementation notes live in the repo (not shipped in the npm package): `docs/specs/2026-10-30-heartbeat-v0.6-design.md` and `docs/plans/2026-10-30-heartbeat-v0.6.md`.
 
