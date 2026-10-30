@@ -25,6 +25,7 @@ function browserHarness() {
   const rows = [
     { textContent: 'General' },
     { textContent: 'Memory' },
+    { textContent: '心跳' },
     { textContent: 'Heartbeat' },
     { textContent: '  Heartbeat  ' },
   ].map((row) => ({
@@ -73,7 +74,10 @@ function browserHarness() {
     }
   }
   const sandbox = {
-    window: { __ModuleLoader__: { load(entry) { registration = entry } } },
+    window: {
+      __ModuleLoader__: { load(entry) { registration = entry } },
+      navigator: { language: 'zh-CN' },
+    },
     document: documentStub,
     MutationObserver: MutationObserverStub,
     console,
@@ -98,10 +102,19 @@ function browserHarness() {
 }
 
 /** Run apply() against a fake slots/effect context. */
-function applyClient(moduleExports) {
+function applyClient(moduleExports, { language = 'zh' } = {}) {
   const slots = { registrations: [], injections: [] }
   const effects = []
+  const dictionaries = []
+  const localeState = { active: language }
   const ctx = {
+    locale: {
+      getSnapshot: () => ({ active: localeState.active, revision: 1 }),
+      register(namespace, dicts) {
+        dictionaries.push({ namespace, dicts })
+        return () => {}
+      },
+    },
     slots: {
       inject(key, callback) {
         slots.injections.push(key)
@@ -118,7 +131,7 @@ function applyClient(moduleExports) {
     },
   }
   moduleExports.apply(ctx)
-  return { slots, effects }
+  return { slots, effects, dictionaries, localeState }
 }
 
 test('client half registers the settings section as Heartbeat', () => {
@@ -130,18 +143,55 @@ test('client half registers the settings section as Heartbeat', () => {
   assert.equal(entry.name, 'settings.section')
   assert.equal(entry.id, 'heartbeat')
   assert.equal(entry.order, 100)
-  assert.equal(entry.label(), 'Heartbeat', 'the retired 心跳 Heartbeat label must not come back')
+  assert.equal(entry.label(), '心跳', 'Chinese app language yields the Chinese label')
   assert.equal(typeof component, 'function')
-  assert.deepEqual(effects.map((effect) => effect.label), ['heartbeat: settings nav icon'])
+  const labels = effects.map((effect) => effect.label)
+  assert.ok(labels.includes('heartbeat: settings nav icon'))
+  assert.ok(labels.includes('heartbeat: dictionaries'))
   assert.ok(rows.length > 0)
+})
+
+test('sidebar label and icon follow a language switch', () => {
+  const { moduleExports, rows, observers } = browserHarness()
+  const first = applyClient(moduleExports, { language: 'zh' })
+  const entry = first.slots.registrations[0].entry
+  assert.equal(entry.label(), '心跳')
+  // Browser language switch: label text changes, MutationObserver re-claims.
+  first.localeState.active = 'en'
+  assert.equal(entry.label(), 'Heartbeat')
+  rows.find((row) => row.textContent === '心跳').textContent = 'Heartbeat'
+  assert.ok(observers.length > 0)
+  for (const observer of observers) observer.callback()
+  const claimed = rows.filter((row) => row.attrs.has(NAV_ICON_ATTR)).map((row) => row.textContent)
+  assert.ok(claimed.every((text) => text.trim() === 'Heartbeat'), `claimed rows: ${JSON.stringify(claimed)}`)
+  assert.ok(claimed.length >= 1)
+})
+
+test('panel language follows the DSH locale layer, not navigator', () => {
+  const { moduleExports } = browserHarness()
+  const { slots, dictionaries } = applyClient(moduleExports, { language: 'en' })
+  assert.equal(moduleExports.inject.join(','), 'slots,locale')
+  assert.equal(slots.registrations[0].entry.locale, 'heartbeat', 'slot declares the locale namespace')
+  assert.equal(dictionaries.length, 1)
+  assert.equal(dictionaries[0].namespace, 'heartbeat')
+  assert.deepEqual(Object.keys(dictionaries[0].dicts).sort(), ['en', 'zh'])
+  const zhKeys = Object.keys(dictionaries[0].dicts.zh).sort()
+  const enKeys = Object.keys(dictionaries[0].dicts.en).sort()
+  assert.deepEqual(enKeys, zhKeys, 'both languages expose the same keys')
+  assert.equal(dictionaries[0].dicts.zh.beatNow, '立即一拍')
+  assert.equal(dictionaries[0].dicts.en.beatNow, 'Beat now')
+  assert.equal(slots.registrations[0].entry.label(), 'Heartbeat', 'English app language yields the English label')
+  assert.equal(dictionaries[0].dicts.zh.sectionLabel, '心跳')
+  assert.equal(dictionaries[0].dicts.en.sectionLabel, 'Heartbeat')
 })
 
 test('the nav heart is claimed only on the exact-label row', () => {
   const { moduleExports, rows } = browserHarness()
   applyClient(moduleExports)
   const claimed = rows.filter((row) => row.attrs.has(NAV_ICON_ATTR)).map((row) => row.textContent)
-  assert.deepEqual(claimed, ['Heartbeat', '  Heartbeat  '], 'trimmed exact match only')
+  assert.deepEqual(claimed, ['心跳'], 'Chinese label only claims the Chinese row')
   assert.equal(rows.find((row) => row.textContent === 'Memory').attrs.has(NAV_ICON_ATTR), false)
+  assert.equal(rows.find((row) => row.textContent === 'Heartbeat').attrs.has(NAV_ICON_ATTR), false)
 })
 
 test('the injected mark is the shared-spec black outline heart', () => {
@@ -158,6 +208,29 @@ test('the injected mark is the shared-spec black outline heart', () => {
   assert.match(svg, /stroke-width="1\.3"/)
   assert.match(svg, /stroke="#000"/)
   assert.match(svg, /<path d="M12\.667/)
+})
+
+test('panel helpers: durations, states, languages and strings', () => {
+  const { moduleExports } = browserHarness()
+  const helpers = moduleExports.__test
+  assert.equal(typeof helpers, 'object')
+  assert.equal(helpers.formatDuration(0), '—')
+  assert.equal(helpers.formatDuration(45_000), '45s')
+  assert.equal(helpers.formatDuration(90_000), '2m')
+  assert.equal(helpers.formatDuration(3600_000), '1h')
+  assert.equal(helpers.formatDuration(3900_000), '1h 5m')
+  const zh = (key) => helpers.DICTS.zh[key]
+  const en = (key) => helpers.DICTS.en[key]
+  assert.equal(helpers.stateOf({ paused: true }, zh), '已暂停')
+  assert.equal(helpers.stateOf({ snoozeUntil: Date.now() + 60_000 }, zh), '打盹中')
+  assert.equal(helpers.stateOf({}, zh), '运行中')
+  assert.equal(helpers.stateOf({ paused: true }, en), 'paused')
+  assert.equal(helpers.fallbackT('beatNow'), '立即一拍')
+  assert.equal(helpers.fallbackT('missing.key'), 'missing.key')
+  for (const level of ['L0', 'L1', 'L2', 'L4']) {
+    assert.ok(zh(`level${level}`).includes(level))
+    assert.ok(en(`level${level}`).includes(level))
+  }
 })
 
 test('teardown removes the mark, the stylesheet and the observer', () => {

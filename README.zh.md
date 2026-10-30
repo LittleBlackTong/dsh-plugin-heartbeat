@@ -9,57 +9,136 @@
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D18-green">
 </p>
 
-> DeepSeek Harness 的「心跳」插件：给 agent 装一个定时唤醒的闹钟，让它**主动**开口 —— 汇报进展、风险、卡点，或者没事贫两句。v0.5.0 起每拍还会先做一次**任务巡检**：读会话里的待办、团队任务和目标，把快照塞进心跳，让 agent 来问你要不要动手。类似 OpenClaw 的心跳模式。
+> DeepSeek Harness 的「自主神经」心跳：平时静默拍脉搏、读会话投影，**只在真有变化时开口**——L1 汇报、L2 问你要不要做、L4 升级提醒。没信号就不发消息。
 
-**English TL;DR** — A Cordis plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) that puts a timed heartbeat on every root agent, so it proactively reports progress, risks and blockers; since v0.5.0 each beat also reads the session's todos / Agent Team board / goal, injects a compact snapshot, and asks whether to act — it asks, never starts work.
+**English TL;DR** — An autonomic heartbeat for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): it pulses silently, diffs the session's projections, and only opens a turn on a real change (L1 report / L2 ask / L4 escalate); no signal, no message.
+
+v0.5 把心跳变成「懂任务」；**v0.6.0 把它从节拍器升级成自主神经**：每拍静默读一次会话、算出 arousal（唤醒度），有理由才开口；没东西可说时只记一条 vitals 脉搏、不注入任何消息。
+
+## 注意：v0.6.0 默认行为变了
+
+- **0.5.x**：每个 `intervalSeconds` 都注入一条消息，不管有没有事（任务快照被反复复述）。
+- **0.6.0**：默认是**静默拍**——没信号就不开轮、不注入。只有检测到「值得说」的变化时才按 L1/L2/L4 开口（见下面的等级表）。
+- 配置文件升级为 **v2**：`intervalSeconds` → `baseIntervalSeconds`，另加节律 / 静默时段 / 去重 / 预算 / L3 / 工作区字段。旧的 v1 `heartbeat.json` 在加载时**自动迁移**，不需要你动手。
+- 运行态单独存 `<dshHome>/heartbeat-vitals.json`（与配置分离，手改配置不会污染运行态）。它跨重启保留；重启后的 `restartCooldownSeconds`（默认 5 分钟）内即使有信号也保持安静。
+- 设置侧栏的 label 跟随 App 语言——中文显示**「心跳」**、英文显示 **`Heartbeat`**，描边爱心图标不变。
 
 ## 怎么工作
 
-- Host 平面的 Cordis 插件，监听 `agent/created`，给每个 **root agent**（子 agent 跳过）挂一个独立定时器。
-- **热挂载补齐（v0.5.0）**：插件在会话已经开着时才被挂载/热重载（`dsh plugin add`、市场安装、profile live reload 都属于这种）时，只监听 `agent/created` 会永远错过这些已存在的会话。`apply()` 里除监听事件外，还会对 `ctx.agents.roots()` 当前的 root agent 做一次**幂等补挂**，已打开的会话照样开始心跳（子 agent 仍跳过）。
-- 每次心跳通过 `agent.followup()` 注入一条合成 user 消息（session format v4 的 producer-owned kind：`source.kind === 'plugin:heartbeat'`）：
-  - **agent 空闲** → 立即开新一轮，主动说话；
-  - **agent 忙** → 消息排队，当前轮结束立刻处理 —— **不打断、不丢失**；
-  - 连续忙时多拍心跳 → 只保留一条待处理（`inbox.replace` 原地替换，不堆积）。
-- **退避间隔（v0.4.0）**：初始 10 分钟；无人回复则下一拍 20 分钟、再下一拍 30 分钟（`[base, 2×base, 3×base]` 自动推导，可 `backoffSeconds` 显式覆盖）。冷场越久，吵得越稀。
-- **硬停保证（v0.4.0，token 保护）**：连续 `pauseAfterMissed`（默认 3）拍没有真人回复 → **拆掉定时器彻底停止**，绝不再投递；只有你的下一条消息能复活它，并从初始 10 分钟档**重新计时**。聊天活跃时每次你说话都会重置相位——心跳只在真正的冷场后才开口。
-- **轻量唤醒（v0.4.0）**：投递前先请宿主的 compaction 服务把长历史压成 checkpoint 摘要（`compactBeforeBeat`，默认开，失败不影响投递），注入的指令明确「不调工具、不复盘历史、≤5 句」——每拍消耗的上下文尽量小。
-- **每小时封顶（可选）**：`maxBeatsPerHour`（默认 0=关）给任何 60 分钟窗口设心跳上限，防「断续回复反复重置退避」的极端烧法。
-- **任务巡检（v0.5.0）**：每拍投递前读一次会话投影（待办 / 团队任务板 / 目标），把未完成事项压成快照塞进心跳，并指示 agent **只提问、不擅自开工**。详见下一节。
-- 注入的消息在对话流里渲染为一条折叠的 context 小行，不是整块用户气泡。
+Host 平面的 Cordis 插件，给每个 **root agent**（子 agent 跳过）挂一个 runtime —— 包括插件热挂载时已经存在的会话。
 
-## 任务巡检（v0.5.0）
+每一拍都走同样四步，插件内部**不调用任何 LLM 做判断**：
 
-心跳不再只靠「最近对话」猜状态。每拍投递前，插件同步读一次宿主的 **session projections**（`ctx.sessionProjections`），把结果压成一段紧凑快照注入心跳消息：
+```
+sensors（传感器）→ rhythm（节律）→ gate（门控）→ action（动作）
+```
 
-| 投影 key | 读到的内容 | 进快照的规则 |
+- **传感器**（`lib/sensors.js`）：同步读会话的公开投影 —— `todos`、`agentTeam`、`goal`、`userQuestions`，外加 `contextPressure` —— 并**与上一拍看到的做 diff**。只有变化才会变成信号，每个信号带权重，权重加总成 **arousal（0–8）**。每拍重复同一份待办清单，正是 v0.6 要消除的噪音。
+- **节律**（`lib/rhythm.js`）：下一拍间隔 = `baseInterval × (1 + missed) × mood(arousal)`，钳制在 30 秒 – 24 小时；arousal 越高间隔越短（arousal 4 → 间隔缩到三分之一）。静默时段直接不排拍，投递后有 refractory 静默窗，另加一个确定性的小 jitter，避免多个会话在同一刻一起跳。
+- **门控**（`lib/gate.js`）：判定 **L0（静默）/ L1（汇报）/ L2（询问）/ L4（升级）**，套用去重窗口与每日预算；你刚说过话、上下文压力过高、处于静默时段、被打盹/暂停时，都拒绝开口。
+- **动作**（`lib/runtime.js`）：L1/L2/L4 时先按需压缩长历史，再注入一条消息，内含 **why-now（为什么现在叫你）**、任务快照（`taskNudge` 开着时）与该等级的指令。**L0 拍不注入任何东西**，只在 vitals 历史里记一行。
+
+投递机制（沿用 v0.5）：
+
+- **agent 空闲** → 立刻开新一轮；
+- **agent 忙** → 消息停在 `next-turn` inbox，当前轮结束立刻被取走 —— 最多一条待处理，原地替换（`inbox.replace`），绝不堆积；
+- 连续没人回 → 达到 `pauseAfterMissed`（默认 3）后**硬停**；只有你的真实消息能复活它并重置相位；
+- 可选的滑动**每小时上限**（`maxBeatsPerHour`）防「断续回复不断重置退避」的极端情况。
+
+**事件驱动（v0.6 新增）**：宿主提供 `sessionProjections.onChanged` 时，`todos` / `agentTeam` / `goal` / `userQuestions` 的变化会给会话打标记，**2 秒防抖**后额外跑一拍 —— 仍要过全部门控（去重、预算、静默时段）。没有该服务就退化为纯定时器模式。
+
+## 自主等级（L0–L4）
+
+| 等级 | 行为 | v0.6 默认 |
 |---|---|---|
-| `todos` | 会话待办清单（`content` / `status`） | 只留 `in_progress`、`pending`；`completed` 丢弃 |
-| `agentTeam` | Agent Team 团队任务板（`subject` / `status` / `blockedBy`） | 只留未完成条目，按「可开始 → 进行中 → 被阻塞」排序，阻塞会标明依赖哪个任务 |
+| **L0** | 静默拍：读、diff、记录 —— **不注入** | ✅ 所有无信号 tick 的默认 |
+| **L1** | 开一轮，只**汇报**进展 / 风险 / 卡点 | ✅ 仅有进展类信号时 |
+| **L2** | 开一轮并**提问**（`ask_user_question`）：要不要现在做 / 怎么选 | ✅ 出现需要决策的信号时 |
+| **L3** | 在**已授权类别**内自行推进，不必先问 | ⛔ **默认关闭**（`l3Allow: []`），只做指令级授权 |
+| **L4** | 与 L2 相同但要**升级措辞**：同一决策信号已经没人回应（`missed ≥ 2`）—— 只升级措辞，不加频 | ✅ |
+
+需要决策（因而走 L2/L4）的信号：团队任务变**可开始**、团队任务变**被阻塞**、目标进入 **blocked / paused**、有**待回答的用户提问**。只是进展类的信号（团队任务完成、待办变化）走 L1。
+
+### 一段话讲清 L3
+
+L3 是一份**按类别授权的清单** —— `read`（检索 / 读文件）、`test`（跑测试 / lint / 构建）、`notes`（写工作区文档 / 笔记）、`continue`（续写已约定草稿）。默认为空，所以 v0.6 默认行为就是「只问不做」。授权后，L2/L4 消息会多一行，说明这些类别内可以自行推进，其余一切仍然先问。**L3 不是沙箱**：发布、部署、删除、`rm`、git push、任何外部写永远不进白名单，不可逆操作仍由宿主 approval 拦截。授权只改指令，不改宿主的安全检查。
+
+## 信号、去重与预算
+
+| 信号 | 来源（投影 diff） | 去重键 | 权重 |
+|---|---|---|---|
+| 团队任务变可开始 | `agentTeam` | `team:<id>:ready` | +5 |
+| 团队任务变被阻塞 | `agentTeam` | `team:<id>:blocked` | +4 |
+| 目标受阻 / 暂停 | `goal` | `goal:<id>:<phase>` | +4 |
+| 待回答的用户提问 | `userQuestions` | `question:<callId>` | +3 |
+| 待办发生变化（有未完成项） | `todos` | `todos:<signature>` | +2 |
+| 团队任务完成 | `agentTeam` | —（只汇报，不去重） | +1 |
+
+`arousal = clamp(Σ 权重, 0, 8)`；arousal 越高，下一拍间隔越短。
+
+开口前会被这些条件抑制（都在 `lib/gate.js`）：
+
+- **你刚说过话**（2 分钟内）—— 让位给人；
+- **上下文压力 > 0.9** —— 接近上下文上限时不额外开轮；
+- **静默时段**（默认 `23:00–08:00`，可配置，`null` 关闭）；
+- **禁用 / 打盹 / 暂停**，或 `mode: "silent"`；
+- **去重**：同一信号键在 `dedupeWindowMinutes`（默认 90）内已经问过 → 丢弃；
+- **每日预算**：每个自然日最多 `maxBeatsPerDay`（默认 12，`0` = 不限）条主动消息，进程内跨会话共享计数。
+
+唯一例外是面板上的 **立即一拍（Beat now）**：手动拍跳过「礼貌闸门」（静默时段、预算、去重、你刚说过话），但仍会做等级判定，也仍要求 agent 真有可用的驱动面。
+
+## 任务巡检（消息里的快照）
+
+v0.5 起每拍可以携带一段任务快照；传感器复用同一批投影，所以「消息里说的」和「信号判的」不会互相矛盾。
+
+| 投影 | 读到的内容 | 进快照的规则 |
+|---|---|---|
+| `todos` | 会话待办清单（`content` / `status`） | 只留 `in_progress` / `pending`；`completed` 丢弃 |
+| `agentTeam` | Agent Team 团队任务板（`subject` / `status` / `blockedBy`） | 只留未完成条目，按「可开始 → 进行中 → 被阻塞」排序，阻塞会标明依赖 |
 | `goal` | 持久目标（`objective` / `phase`） | 只留 `active` / `paused` / `blocked` 三种相位 |
 
 读之前要知道的两件事：
 
-- `agentTeam` 投影**只有启用 Agent Team 可选包时才注册**；未启用时读不到它 → 自动降级，不报错、快照里也不会出现团队任务段。
-- `todos` 投影**每个 turn 开始会重置**：心跳看到的是「最近一个 turn 内的待办」，不是会话级长期 TODO——别把它当持久任务清单。
+- `agentTeam` 投影**只有启用 Agent Team 可选包时才注册**；未启用时读不到 → 自动降级，不报错、快照里也没有团队任务段。
+- `todos` 投影**每个 turn 开始会重置**：心跳看到的是「最近一个 turn 内的待办」，不是会话级长期 TODO。
 
-快照后面附一条指令：发现「该做但还没人拍板」的事 → 用 `ask_user_question` 工具（不可用就直接问）问用户「现在要不要我主动做」，最多 3 条、每条一句建议；**只提问，不擅自开工**。
+健壮性：
 
-健壮性约定：
+- 宿主没注册投影服务 / 会话未绑定 / 某个投影读取抛错 → 该信号或该快照降级；**任何读取失败都不会让一拍丢失**；
+- 任务块有 **800 字符硬上限**；`taskNudgeMaxItems` 再限每类条目数（默认 5，1–20）；
+- 插件对投影**只读不写**，不改你的待办、任务板或目标；
+- 自定义 `prompt` 不含 `{{tasks}}` 时，任务块自动追加。
 
-- 宿主没注册 `sessionProjections` 服务、会话还没绑定、或某个投影读取抛错 → **降级为提示语**，心跳照常投递；绝不因为任务巡检失败而丢拍。
-- 任务块（快照 + 提问指令）有 **800 字符硬上限**，`taskNudgeMaxItems` 再限每类条目数（默认 5，范围 1–20）——任务巡检是加料，不是加负担。
-- 插件对投影**只读不写**：不改你的待办、团队任务板或目标；任务要真的被改动，仍然由你或 agent 走正常工具链。
-- 自定义 `prompt` 不含 `{{tasks}}` 占位符时，任务块（快照 + 指令）自动追加到提示词末尾（v0.4.x 的自定义提示词不用改）。
+## 生命体征与手动控制
 
-配置（**Heartbeat** 设置区块里可开关）：
+**设置 → Heartbeat** 面板展示心跳自己的生命体征，数据来自 `GET /api/heartbeat/status`（每 10 秒刷新）：
 
-| 键 | 默认 | 含义 |
+- **状态**：运行中 / 打盹中 / 已暂停（含原因）；
+- **下次检查**：按当前节律算出的 ETA；
+- **今日预算**：已投递条数 / `maxBeatsPerDay`；
+- **最近脉冲**：最近 5 行（时间 + 等级 L0–L4 + 原因）——「它刚才为什么没说话」就查这里。
+
+按钮（POST `/api/heartbeat/control`）：
+
+| 操作 | 效果 |
+|---|---|
+| **立即一拍（Beat now）** | 立刻强制一拍（手动：跳过礼貌闸门，仍判等级） |
+| **打盹 30 分钟（Snooze 30m）** | 30 分钟内不拍（API 的 `minutes` 可配，1–1440） |
+| **暂停（Pause）** | 这个会话的心跳停到恢复为止 |
+| **恢复（Resume）** | 解除暂停 / 打盹，按当前节律重新排拍 |
+| **重置（Reset）** | 清掉打盹与暂停并恢复 |
+
+路由（回环、插件自建）：
+
+| 方法 | 路径 | 用途 |
 |---|---|---|
-| `taskNudge` | `true` | 是否做任务巡检；关闭后心跳消息里不再注入任务快照，也没有巡检 / 提问指令 |
-| `taskNudgeMaxItems` | `5` | 快照里每类最多列几项（1–20） |
+| GET / POST | `/api/heartbeat/config` | 读 v2 配置 / patch 合并（校验后热应用） |
+| GET | `/api/heartbeat/status` | 配置摘要、今日预算、每会话生命体征 + `nextBeatAt` + 最近 5 拍 |
+| POST | `/api/heartbeat/control` | `{action: "beat-now" \| "snooze" \| "pause" \| "resume" \| "reset", sessionId?, minutes?}` |
 
-关掉 `taskNudge` 不影响心跳本身：消息退化为通用的「汇报进展 / 提问 / 报个日常」提示词，比开着时更短。
+指定 `sessionId` 时只作用于该会话，省略则作用于全部存活会话。
+
+面板文案走 DSH 自己的语言层：client 半注入 `locale`、注册 `heartbeat` 命名空间的中英语言包，并在 settings section 上声明 `locale: 'heartbeat'`——所以面板**跟随「设置 → 通用设置 → 语言」**，切换 App 语言即时重渲染（不靠浏览器语言猜）。侧栏 label 走同一套语言包（中文「心跳」/ 英文 `Heartbeat`），语言切换后爱心图标的认领会自动重跑，标记始终落在当前那一行。
 
 ## 安装
 
@@ -69,7 +148,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 
 （包内置 `dsh.bundle` manifest，`dsh plugin add` 会把它自动挂进 profile 的 bundles 层；dsh-market 里的一键安装同此通道。）
 
-重启 DSH 后生效。之后在 **设置 → Heartbeat** 面板里随时改频率、开关、暂停阈值与任务巡检，保存即热应用（无需重启）。
+重启 DSH 后生效。之后在 **设置 → Heartbeat** 面板里随时改模式、间隔、静默时段、去重窗口、预算、L3 授权与任务巡检，保存即热应用（无需重启）。
 
 > ⚠️ **不要**再往 profile 的 `cordis.patch.yml` 里手写 `- insert: {id: dsh-heartbeat, ...}`：
 > 那会与 bundle manifest 的自动挂载产生两条同名 entry，整个 profile 会以
@@ -79,29 +158,50 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 
 ## 设置侧栏图标
 
-设置侧栏里的这一项带一个**描边爱心**标记：16×16 网格、`stroke-width: 1.3`（与宿主 `ICON_MEDIUM_STROKE` 一致）、纯黑描边只提供 alpha，可见颜色由 `mask-image` + `currentColor` 决定，深浅主题都跟随。规格与 dsh-plugin-memory 的图标完全统一。官方 `settings.section` 槽只投影 id / order / label，**没有 icon 字段**，所以插件按 label 文本精确认领自己那一行，并用 `MutationObserver` 跟随语言切换 / 面板重挂载重新认领，卸载时清理干净。
+设置侧栏里的这一项带一个**描边爱心**标记：16×16 网格、`stroke-width: 1.3`（与宿主 `ICON_MEDIUM_STROKE` 一致）、纯黑描边只提供 alpha，可见颜色由 `mask-image` + `currentColor` 决定，深浅主题都跟随。规格与 dsh-plugin-memory 的图标完全统一。官方 `settings.section` 槽只投影 id / order / label，**没有 icon 字段**，所以插件按**当前语言的 label 文本**（中文「心跳」/ 英文 `Heartbeat`）精确认领自己那一行，并用 `MutationObserver` 跟随语言切换（认领键随 label 变化）与面板重挂载重新认领，卸载时清理干净。
 
 ## 版本要求
 
 - **DSH：官方 0.2.1-rc.5 系列**。`package.json` 已声明 `engines.dsh: "^0.2.1-rc.5"`——宿主用 semver（`includePrerelease: true`）做引擎闸门，注意 prerelease 语义：`^0.2.1` / `>=0.2.0` **都匹配不上** `0.2.1-rc.5`，必须写 `^0.2.1-rc.5` 才认；它同时覆盖将来 0.2.1 正式版，而 0.3.0-rc.1 会被判不兼容。
-- **session format v4**（官方 0.1.7+）。心跳消息的 source 使用 producer-owned kind `plugin:heartbeat`；v4 的原生准入拒绝 v3 的 `{kind:'plugin', plugin:'heartbeat'}` wrapper，报 `format v4 message requires a producer-owned source kind`（该错误被包成 `code: "UNKNOWN"`，界面显示为 `... source kind UNKNOWN`——`UNKNOWN` 是错误码，不是 kind 值）。v4 与 v3 白名单互斥、无法两全。
-- **0.4.2 是最后一个 v3 兼容版本**；**0.5.0 起只支持官方 DSH 0.2.1-rc.5 系列**（session format v4 + 当前离线验证过的宿主 API）。更早的 0.2.x 若没有 `sessionProjections` 会自动降级，但未逐版本验证；0.3.x 暂不支持。
-- **实机验证**（DSH Desktop 0.2.1-rc.5，运行中的真实宿主）：**心跳投递 + 任务巡检快照注入**已跑通——真实会话里 `todos` 与 Agent Team 任务板都正确注入（`ready` / `blockedBy` 推导正确），source `plugin:heartbeat` 通过 session v4 准入；设置面板 `GET/POST /api/heartbeat/config` 实机读写并热应用。注：pre-beat 压缩路径只有单测覆盖，未单独做实机观察。
+- **session format v4**（官方 0.1.7+）。心跳消息的 source 使用 producer-owned kind `plugin:heartbeat`；v4 的原生准入拒绝 v3 的 `{kind:'plugin', plugin:'heartbeat'}` wrapper。v4 与 v3 白名单互斥、无法两全。
+- **0.4.2 是最后一个 v3 兼容版本**；**0.5.0 起只支持官方 DSH 0.2.1-rc.5 系列**。0.3.x 暂不支持。
+- **实机验证**（DSH Desktop 0.2.1-rc.5，重启后加载 v0.6.0 构建）：
+  - `GET /api/heartbeat/status` → 200，返回 2 个 live session（含 `sessionId` / `cwd` / `nextBeatAt` / 预算 / history）；`/api/heartbeat/config` 返回 **v2** 配置；
+  - 已有的 v1 `heartbeat.json` 自动迁移到 v2（`intervalSeconds` → `baseIntervalSeconds`，新增 mode / 静默时段 / 预算等字段），并自动创建 `heartbeat-vitals.json`；
+  - **静默拍生效**：临时把间隔调到 60 秒等一拍，两个会话的 vitals 各记录一条 `L0 · 没有新信号 · delivered: false`，**每日预算仍为 0**（零注入）；随后已恢复 600 秒 / jitter 60；
+  - **热插拔**：运行中 `dsh plugin remove` 使 `/status` 从 200 变 401（路由消失、无崩溃），`add` 回来恢复 200 且会话恢复；
+  - **控制路由**：未知 action 返回 400，`snooze` 让 `snoozeUntil` 生效，`reset` 清零恢复；
+  - 侧栏爱心图标与 `Heartbeat` 区块正常渲染。
+  **未单独实机验证**（仅单测覆盖）：事件驱动时延（≤10 秒）、pre-beat 压缩、真实的 L2 提问投递。v0.6 自主层由 116 个单测覆盖。
 
-## 配置
+## 配置（v2）
+
+用户配置在 `<dshHome>/heartbeat.json`（面板可写，也能手改；用 schemastery 校验）。composition 配置是基线层，用户文件覆盖它，匹配到的 `workspaces` 条目再覆盖两者。
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `enabled` | `true` | 总开关（用户层存在 `<dshHome>/heartbeat.json`） |
-| `intervalSeconds` | `600` | 初始心跳周期（钳制在 30–86400 秒）；退避后续档自动 ×2、×3 |
-| `pauseAfterMissed` | `3` | 硬停阈值：连续 N 拍无真人回复 → 拆定时器彻底停止；用户下一条消息复活并回初始档重新计时。`0` = 关闭 |
-| `taskNudge` | `true` | 任务巡检：每拍读一次会话里的待办 / 团队任务 / 目标并把快照与提问指令注入心跳；关闭后两者都不出现（用户层可改） |
-| `taskNudgeMaxItems` | `5` | 任务快照里每类条目上限，1–20（用户层可改） |
-| `backoffSeconds` | 未设 | 显式退避档位数组（如 `[600, 900, 1800]`，仅 composition） |
-| `compactBeforeBeat` | `true` | 投递前先压缩历史为 checkpoint 摘要（仅 composition，无 compaction 服务时自动跳过） |
-| `maxBeatsPerHour` | `0` | 每 60 分钟滑动窗口的心跳上限（`0`=关闭，仅 composition） |
-| `prompt` | 内置 | 每拍投递的指令模板，`{{time}}` 替换为当前时间、`{{tasks}}` 替换为任务快照（仅 composition 配置） |
-| `configFile` | `<dshHome>/heartbeat.json` | 用户配置文件路径（`enabled` / `intervalSeconds` / `pauseAfterMissed` / `taskNudge` / `taskNudgeMaxItems`） |
+| `enabled` | `true` | 总开关 |
+| `mode` | `"assist"` | `"assist"` = 有信号就开口；`"silent"` = 永不开口（照常拍脉搏并记录） |
+| `baseIntervalSeconds` | `600` | 基础拍间隔（30–86400 秒）；退避档位以它为基准 |
+| `pauseAfterMissed` | `3` | 连续 N 拍没人回 → 硬停（`0` = 关闭）；你的下一条消息复活它 |
+| `backoffSeconds` | `null` | 显式退避档位数组（`null` = 自动推导 `[base, 2×base, 3×base]`） |
+| `compactBeforeBeat` | `true` | 开口前先把长历史压成 checkpoint（尽力而为，失败不影响投递） |
+| `maxBeatsPerHour` | `0` | 滑动每小时投递上限（`0` = 关闭） |
+| `maxBeatsPerDay` | `12` | 每日投递预算（`0` = 不限），进程内跨会话共享 |
+| `dedupeWindowMinutes` | `90` | 同一信号键在该窗口内不重复问（`0` = 关闭） |
+| `refractorySeconds` | `300` | 投递后至少安静这么久才允许下一拍 |
+| `jitterSeconds` | `60` | 确定性的每会话抖动（0–600 秒），让多个会话错开 |
+| `restartCooldownSeconds` | `300` | 重启后即使有信号也先安静这么久 |
+| `quietHours` | `{"start":"23:00","end":"08:00"}` | 该时段内不开口（支持跨午夜；`null` = 关闭） |
+| `taskNudge` | `true` | 是否在心跳里带任务快照 + 提问指令 |
+| `taskNudgeMaxItems` | `5` | 任务快照每类条目上限（1–20） |
+| `l3Allow` | `[]` | L3 授权类别：`read` / `test` / `notes` / `continue` |
+| `prompt` | `null` | 自定义提示词模板（`{{time}}` / `{{tasks}}` / `{{reason}}`）；`null` = 内置分级提示词 |
+| `workspaces` | `{}` | 按会话绝对 cwd 的工作区覆盖 |
+
+`workspaces` 条目可写：`enabled`、`mode`、`baseIntervalSeconds`、`quietHours`（对象或 `null`）、`maxBeatsPerDay`、`l3Allow`。优先级：composition 配置 < 用户配置 < 命中的工作区覆盖。
+
+**v1 → v2 迁移**：v1 文件（`intervalSeconds`、无 `version`）在加载时迁移——`intervalSeconds` 变成 `baseIntervalSeconds`，其余字段语义不变，缺失字段取 v2 默认值——并回写成 v2。坏配置文件会被忽略（内存里保留上一份好配置，下次启动用默认值）；无法识别的键不会写回。运行态是另一个文件：`<dshHome>/heartbeat-vitals.json`。
 
 自定义心跳提示词（composition 配置，**不带 `insert`**，避免与 bundle 层重复）：
 
@@ -109,17 +209,17 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 - id: dsh-heartbeat
   config:
     prompt: |
-      【心跳】当前时间 {{time}}。看一眼最近的对话和待办：
-      有进展说进展、有风险说风险；都没有就一句话带过。
-      总长不超过 5 句，中文。
+      【心跳】{{time}} —— 为什么现在叫你：{{reason}}
+      {{tasks}}
+      有实质进展/风险就简短汇报；要动手先问。
 ```
 
-想指定任务快照插在哪，就把 `{{tasks}}` 写进自定义提示词；不写也能用——`taskNudge` 开着时快照会自动追加到末尾。
+`{{time}}`、`{{tasks}}`、`{{reason}}` 会被替换。模板里没有 `{{tasks}}` 时任务块追加到末尾；没有 `{{reason}}` 时 why-now 行追加到末尾。
 
 > 为什么不用 settings 面板的通用 namespace？DSH 的 settings wire 只服务一张
 > 硬编码白名单（`WEB_SETTINGS_NAMESPACES`），插件无法把自有 namespace 暴露给
-> 浏览器写入。本插件因此在 host 自建了 `GET/POST /api/heartbeat/config`
-> 路由，设置面板里的 **Heartbeat** 区块直连该路由，写入即热应用。
+> 浏览器写入。本插件因此在 host 自建了 `/api/heartbeat/*` 路由，
+> 设置面板里的 **Heartbeat** 区块直连这些路由，写入即热应用。
 
 ## 开发
 
@@ -127,22 +227,23 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 node --test
 ```
 
-无参 `node --test` 会自动发现 `test/*.test.mjs`（`test/runtime.test.mjs` + `test/tasks.test.mjs` + `test/settings-nav-icon.test.mjs` + `test/client-half.test.mjs`），当前共 74 个用例。
+无参 `node --test` 会自动发现 `test/*.test.mjs`；测试覆盖 `runtime`、`tasks`、`sensors`、`rhythm`、`gate`、`vitals`、`config-store-v2`、`prompt-levels`、`wiring-v06`、`settings-nav-icon`、`client-half`，当前共 **116 个用例**。
+
+设计与实施记录在仓库里（**不进 npm 包**）：`docs/specs/2026-10-30-heartbeat-v0.6-design.md`、`docs/plans/2026-10-30-heartbeat-v0.6.md`。
 
 ## 已知边界
 
 - 心跳只在 DSH 进程活着时存在（app 关了就停）。
-- 每个会话（root agent）各自一条定时器，互不干扰；子 agent 不挂心跳。
-- 插件在会话已打开后才热挂载/热重载时，会对现有 root agent 做一次幂等补挂（不重复计时）；热挂载之后新开的会话仍走 `agent/created`。
-- 心跳**不打断**正在跑的任务；任务结束后它会立刻补一句。
-- 心跳是「汇报」不是「新任务」：默认提示词要求它别自作主张开新活。
-- 任务巡检同样只问不做：快照里的事项要真的动手，仍需要你在心跳提问里点头。
-- `taskNudge: false` 是整开关：心跳消息里没有任务快照、也没有巡检 / 提问指令，只留通用汇报提示词。
-- 任务快照来自宿主 session projections，是**只读**的实时视图；宿主没有该服务（较老版本的 DSH）时自动降级为纯提示词心跳，不会报错。
-- 硬停前已排队的一条心跳（agent 忙时）会在当前轮结束时被消费——此后绝无新拍。
+- 每个 root agent 各自一条 runtime；子 agent 不挂心跳。
+- **默认安静**：没有变化就不说话。存在感现在靠面板的生命体征与「立即一拍」，而不是按点叨叨——想让它更活跃就调 `mode` / 去重 / 静默时段相关配置。
+- L3 **不是沙箱**：只改指令；不可逆操作仍由宿主 approval 拦截。
+- 运行态（`heartbeat-vitals.json`）是进程内的，原子写 + 短防抖；两个 DSH 进程共用一个 home 时是「尽力而为」，不是强一致。
+- 事件驱动需要 `sessionProjections.onChanged`；没有该服务时退化为纯定时器模式（门控相同，只是反应没那么快）。
+- 插件在会话已打开后才热挂载时，会对现有 root agent 做一次幂等补挂；之后新开的会话仍走 `agent/created`。
+- 插件依赖 `agent.followup` / `agent.inbox` 等 **agent-loop 驱动面**——不属于 DSH 公开 API catalog，已锁定 DSH 0.2.x；宿主若换实现，最多丢一拍并打一条 warn。
+- `taskNudge: false` 会同时去掉任务快照与巡检 / 提问指令。
 - 与 dsh-plugin-memory 互相独立、零依赖；两者同时安装时消息在同一个 inbox 队列里排队，不冲突。
-- 插件依赖 `agent.followup` / `agent.inbox` 等 **agent-loop 驱动面**——它们不属于 DSH 公开 API catalog，已锁定 DSH 0.2.x；宿主若换实现，最多丢一拍并打一条 warn，不会在定时器里抛崩插件。
-- **版本要求**：官方 DSH 0.2.1-rc.5 系列、session format v4；`package.json` 已声明 `engines.dsh: "^0.2.1-rc.5"`，细节见上方「版本要求」。
+- **版本要求**：官方 DSH 0.2.1-rc.5 系列、session format v4；`engines.dsh: "^0.2.1-rc.5"`，细节见上方「版本要求」。
 
 ## License
 

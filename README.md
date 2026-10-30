@@ -9,57 +9,134 @@
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D18-green">
 </p>
 
-> A heartbeat plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): wakes the agent on a configurable interval so it proactively reports progress, risks, and blockers — and, before each beat, inspects the session's own todos, team board and goal so it can ask whether to act — or just checks in.
+> An autonomic heartbeat for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): it pulses in silence, reads the session's own projections, and only opens a turn when something actually changed — a report (L1), a decision question (L2), or an escalation (L4). No signal, no message.
 
-A Cordis plugin for DeepSeek Harness: put a timed alarm on your agent so it **proactively** speaks up — progress, risks, blockers, or just a casual check-in. Since v0.5.0 every beat also runs a **task inspection**: it reads the session's todos, team board and goal, folds them into a compact snapshot, and lets the agent ask whether you want it to act. In the spirit of OpenClaw's heartbeat mode.
+A Cordis plugin for DeepSeek Harness. v0.5 made the heartbeat *task-aware*; **v0.6.0 turns it from a metronome into an autonomic nervous system**: every pulse reads the session silently, measures arousal, and speaks only when there is a reason. When there is nothing to say, the pulse is recorded in its vitals and nothing is injected at all.
+
+## Heads-up: the default behaviour changed in v0.6.0
+
+- **0.5.x**: one message every `intervalSeconds`, whether or not anything happened (the task snapshot was re-read and repeated).
+- **0.6.0**: a **silent pulse** by default — no signal, no turn, no injected message. It speaks at L1/L2/L4 only when it detects a change worth a message (see the level table below).
+- The config file is now **v2**: `intervalSeconds` → `baseIntervalSeconds`, plus rhythm / quiet-hours / dedupe / budget / L3 / workspace fields. An existing v1 `heartbeat.json` is **migrated automatically** on load — nothing to do.
+- Runtime state now lives in `<dshHome>/heartbeat-vitals.json` (separate from the config, so hand-editing the config never pollutes runtime state). It survives restarts, and after a restart the plugin stays quiet for `restartCooldownSeconds` (default 5 minutes) before it may speak again.
+- The settings sidebar label follows the App language — **心跳** in Chinese, **Heartbeat** in English — with the same stroked-heart icon.
 
 ## How it works
 
-- Host-plane Cordis plugin: listens for `agent/created` and attaches an independent timer to every **root agent** (subagents are skipped).
-- **Hot-mount catch-up (v0.5.0)**: when the plugin is mounted/reloaded while sessions are already live (`dsh plugin add`, market install, profile live reload all do this), `agent/created` alone would never see those sessions. So `apply()` also does one **idempotent catch-up attach** over `ctx.agents.roots()`; existing sessions start beating too (subagents still skipped).
-- Each beat injects a synthetic user message through `agent.followup()` (session format v4 producer-owned kind: `source.kind === 'plugin:heartbeat'`):
-  - **agent idle** → a fresh turn opens immediately, so it speaks up on its own;
-  - **agent busy** → the message parks and is claimed the moment the current turn ends — **no interruption, nothing lost**;
-  - several busy ticks → only one pending message is kept (`inbox.replace` in place, no backlog).
-- **Backoff (v0.4.0)**: 10 minutes initially; 20 then 30 while nobody answers (`[base, 2×base, 3×base]`, overridable with `backoffSeconds`). The longer the silence, the rarer the noise.
-- **Hard stop (v0.4.0, token guard)**: after `pauseAfterMissed` (default 3) beats with no human reply the timer is **torn down completely** — nothing is ever delivered again; only your next message revives it, restarting from the initial 10-minute tier. Every real message resets the phase, so heartbeats only speak in genuine silence.
-- **Light wake-up (v0.4.0)**: before delivery the plugin asks the host compaction service to fold long history into a checkpoint summary (`compactBeforeBeat`, on by default; a failure never blocks delivery), and the injected instruction says "no tools, no history replay, ≤5 sentences" — each beat costs as little context as possible.
-- **Hourly cap (optional)**: `maxBeatsPerHour` (default 0 = off) caps beats in any 60-minute window, against the "sporadic replies keep resetting backoff" worst case.
-- **Task inspection (v0.5.0)**: before each beat it reads the session projections (todos / team board / goal), folds open items into a snapshot, and instructs the agent to **ask only, never start work**. See the next section.
-- Injected messages render as a collapsed context chip in the transcript, not a full user bubble.
+A host-plane Cordis plugin attaches one runtime to every **root agent** (subagents are skipped), including sessions that already exist when the plugin is hot-mounted.
 
-## Task inspection (v0.5.0)
+Each pulse runs the same four steps — the plugin itself never asks an LLM to decide:
 
-A heartbeat no longer has to guess from "the last conversation". Before each beat the plugin synchronously reads the host's **session projections** (`ctx.sessionProjections`) and folds the result into a compact snapshot injected with the beat:
+```
+sensors → rhythm → gate → action
+```
 
-| Projection | What it reads | What enters the snapshot |
+- **Sensors** (`lib/sensors.js`): synchronously read the session's public projections — `todos`, `agentTeam`, `goal`, `userQuestions`, plus `contextPressure` — and **diff them against what the last pulse saw**. Only changes become signals, each with a weight; the weights sum into an **arousal** score (0–8). Repeating the same todo list on every beat is exactly the noise v0.6 removes.
+- **Rhythm** (`lib/rhythm.js`): the next interval is `baseInterval × (1 + missed) × mood(arousal)`, clamped to 30 s – 24 h, where higher arousal shortens the interval (arousal 4 → one third). Quiet hours suspend pulses entirely, a refractory window enforces a minimum silence after a delivery, and a small deterministic jitter stops several sessions from firing on the same tick.
+- **Gate** (`lib/gate.js`): decides **L0 (silent) / L1 (report) / L2 (ask) / L4 (escalation)**, applies the dedupe window and the daily budget, and refuses to speak when you just spoke, when context pressure is high, during quiet hours, or while paused/snoozed.
+- **Action** (`lib/runtime.js`): for L1/L2/L4 it optionally compacts long history first, then injects one message carrying a **why-now line**, the task snapshot (when `taskNudge` is on) and a level-specific instruction. An **L0 pulse injects nothing** — it only records a row in the vitals history.
+
+Delivery mechanics (unchanged from v0.5):
+
+- **agent idle** → a fresh turn opens immediately;
+- **agent busy** → the message parks in the `next-turn` inbox and is claimed when the current turn ends — at most one pending beat, replaced in place (`inbox.replace`), never stacked;
+- consecutive unanswered beats trigger a **hard stop** after `pauseAfterMissed` (default 3); only a real message from you revives the heartbeat and resets its phase;
+- an optional sliding **hourly cap** (`maxBeatsPerHour`) protects against the "sporadic replies keep resetting the backoff" worst case.
+
+**Event-driven beats (new in v0.6)**: when the host exposes `sessionProjections.onChanged`, a change in `todos` / `agentTeam` / `goal` / `userQuestions` marks the session and runs **one extra pulse after a 2 s debounce** — still through every gate (dedupe, budget, quiet hours). Without that service the plugin falls back to pure timer mode.
+
+## Autonomy levels (L0–L4)
+
+| Level | Behaviour | Default in v0.6 |
+|---|---|---|
+| **L0** | Silent pulse: read, diff, record — **inject nothing** | ✅ the default for every tick without a signal |
+| **L1** | Open a turn and **report** progress / risks / blockers only | ✅ when there are progress-only signals |
+| **L2** | Open a turn and **ask** (`ask_user_question`) whether to act / which option | ✅ when a decision-bearing signal appears |
+| **L3** | Within **granted categories**, proceed without asking first | ⛔ **off by default** (`l3Allow: []`); instruction-level authorization only |
+| **L4** | Same ask as L2 but with **escalated wording** when a decision signal has already gone unanswered (`missed ≥ 2`) — frequency never increases | ✅ |
+
+Signals that require a decision (and therefore L2/L4): a team task becoming **ready**, a team task becoming **blocked**, the goal entering **blocked / paused**, and a **pending unanswered user question**. Progress-only signals (a team task completed, todos changing) produce L1.
+
+### L3 in one paragraph
+
+L3 is a **per-category grant list** — `read` (search / read files), `test` (run tests / lint / build), `notes` (write workspace docs / notes), `continue` (continue an already-agreed draft). It is empty by default, so v0.6 behaves as "ask, never act". When you grant categories, L2/L4 messages carry one extra line authorizing the agent to proceed inside those categories only; everything else still asks first. **L3 is not a sandbox**: publishing, deploying, deleting, `rm`, git push and any external write are never whitelisted, and irreversible operations are still stopped by the host's approval flow. The grant only changes the instruction, not the host's safety checks.
+
+## Signals, dedupe and budgets
+
+| Signal | Source (projection diff) | Dedupe key | Weight |
+|---|---|---|---|
+| Team task became ready | `agentTeam` | `team:<id>:ready` | +5 |
+| Team task became blocked | `agentTeam` | `team:<id>:blocked` | +4 |
+| Goal blocked / paused | `goal` | `goal:<id>:<phase>` | +4 |
+| Pending user question | `userQuestions` | `question:<callId>` | +3 |
+| Todos changed (open items) | `todos` | `todos:<signature>` | +2 |
+| Team task completed | `agentTeam` | — (reported, not deduped) | +1 |
+
+`arousal = clamp(Σ weights, 0, 8)`; as arousal rises the interval shortens.
+
+What suppresses a pulse before it can speak (all in `lib/gate.js`):
+
+- **you just spoke** (< 2 minutes ago) — the heartbeat defers to you;
+- **context pressure > 0.9** — no extra turns near the context limit;
+- **quiet hours** (default `23:00–08:00`, configurable; `null` disables them);
+- **disabled / snoozed / paused**, or `mode: "silent"`;
+- **dedupe**: a signal key already asked inside `dedupeWindowMinutes` (default 90) is dropped;
+- **daily budget**: at most `maxBeatsPerDay` (default 12, `0` = unlimited) delivered beats per calendar day, counted process-wide across sessions.
+
+The one exception is the panel's **Beat now** button: a manual beat skips the politeness gates (quiet hours, budget, dedupe, "user recently spoke") but still picks its level and still checks that the agent has a usable driver surface.
+
+## Task inspection (the snapshot in the message)
+
+Since v0.5 a beat can carry a compact task snapshot; the sensors reuse the same projections, so the message and the signals cannot disagree.
+
+| Projection | Read | Snapshot rule |
 |---|---|---|
 | `todos` | session todo list (`content` / `status`) | only `in_progress` / `pending`; `completed` dropped |
-| `agentTeam` | Agent Team board (`subject` / `status` / `blockedBy`) | open items only, sorted "ready → in progress → blocked"; blockers are named |
+| `agentTeam` | Agent Team board (`subject` / `status` / `blockedBy`) | open items only, sorted "ready → in progress → blocked"; blockers named |
 | `goal` | persistent goal (`objective` / `phase`) | only `active` / `paused` / `blocked` phases |
 
-Two things to know before reading that table:
+Two things to know:
 
-- the `agentTeam` projection is **only registered when the Agent Team optional package is enabled**; without it the read degrades automatically — no error, and no team section in the snapshot;
-- the `todos` projection **resets at the start of every turn**: a beat sees the todos of the most recent turn, not a session-wide long-term list — don't treat it as a persistent TODO store.
-
-After the snapshot comes one instruction: if something is "worth doing but nobody has called it", use the `ask_user_question` tool (or just ask in the reply) to ask the user "want me to do it now?" — at most 3 suggestions, one sentence each; **ask, never start work**.
+- the `agentTeam` projection is **only registered when the Agent Team optional package is enabled** — without it the read degrades silently;
+- the `todos` projection **resets at the start of every turn**: a beat sees the todos of the most recent turn, not a session-wide long-term list.
 
 Robustness:
 
-- no `sessionProjections` service, no session binding, or a throwing projection → **degrades to a hint** and the beat is still delivered; a failed task inspection never drops a beat.
-- the task block (snapshot + ask instruction) is hard-capped at **800 characters**; `taskNudgeMaxItems` caps items per bucket (default 5, range 1–20) — the inspection is a garnish, not a burden.
-- the plugin **only reads** projections: it never edits your todos, team board or goal; real changes still go through the normal tooling.
-- a custom `prompt` without the `{{tasks}}` placeholder gets the task block appended at the end (v0.4.x custom prompts keep working).
+- missing projection service / missing session / a throwing projection → the signal or the snapshot degrades; a beat is never lost to a failed read;
+- the task block is hard-capped at **800 characters**; `taskNudgeMaxItems` caps items per bucket (default 5, range 1–20);
+- the plugin **only reads** projections; it never edits your todos, board or goal;
+- a custom `prompt` without `{{tasks}}` gets the block appended.
 
-Settings (toggle in the **Heartbeat** section):
+## Vitals and manual control
 
-| Key | Default | Meaning |
+The **Settings → Heartbeat** panel shows the heartbeat's own life signs, fed by `GET /api/heartbeat/status` (refreshed every 10 s):
+
+- **state**: running / snoozed / paused (and the reason);
+- **next check**: the next ETA computed from the current rhythm;
+- **today's budget**: delivered beats vs `maxBeatsPerDay`;
+- **recent pulses**: the last 5 rows with time, level (L0–L4) and reason — this is where "why didn't it speak?" is answered.
+
+Buttons (POST `/api/heartbeat/control`):
+
+| Action | Effect |
+|---|---|
+| **Beat now** | force one pulse immediately (manual: skips the politeness gates, still picks a level) |
+| **Snooze 30m** | no pulses for 30 minutes (`minutes` is configurable through the API, 1–1440) |
+| **Pause** | stop this session's heartbeat until resumed |
+| **Resume** | lift pause / snooze and re-arm from the current rhythm |
+| **Reset** | clear snooze + pause and resume |
+
+Routes (loopback, plugin-owned):
+
+| Method | Path | Purpose |
 |---|---|---|
-| `taskNudge` | `true` | whether to run task inspection; when off, no snapshot and no inspection / ask instruction |
-| `taskNudgeMaxItems` | `5` | max items per bucket in the snapshot (1–20) |
+| GET / POST | `/api/heartbeat/config` | read the v2 config / patch it (validated, hot-applied) |
+| GET | `/api/heartbeat/status` | config summary, today's budget, per-session vitals + `nextBeatAt` + last 5 pulses |
+| POST | `/api/heartbeat/control` | `{action: "beat-now" \| "snooze" \| "pause" \| "resume" \| "reset", sessionId?, minutes?}` |
 
-Turning `taskNudge` off doesn't disable the heartbeat: the message degrades to the generic "report progress / ask / small talk" prompt, shorter than the inspection version.
+Every control action targets the given `sessionId`, or all live sessions when omitted.
+
+The panel's wording is localised through DSH's own locale layer: the client half injects `locale`, registers a `heartbeat` namespace with zh/en packs and declares `locale: 'heartbeat'` on the settings section, so the panel follows **Settings → General → Language** and re-renders immediately when you switch the app language (it does not guess from the browser). The sidebar label follows the same setting — 中文「心跳」/ English `Heartbeat` — and the heart-icon claim re-runs after a language switch, so the mark always sits on the current row.
 
 ## Install
 
@@ -69,36 +146,57 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 
 (The package declares a `dsh.bundle` manifest, so `dsh plugin add` mounts it into the profile's bundles layer automatically; one-click install in dsh-market uses the same path.)
 
-Restart DSH. Then use **Settings → Heartbeat** to change the interval, switch, pause threshold and task inspection at any time; saving applies hot (no restart).
+Restart DSH. Then use **Settings → Heartbeat** to change the mode, interval, quiet hours, dedupe window, budget, L3 grants and task inspection at any time; saving applies hot (no restart).
 
 > ⚠️ **Don't** hand-write `- insert: {id: dsh-heartbeat, ...}` into the profile's `cordis.patch.yml`: it collides with the bundle manifest's automatic mount and the whole profile fails to start with
 > `duplicate loader entry id "dsh-heartbeat"` (real incident on 2026-08-18, colliding with the memory plugin's entry). Runtime config lives in `<dshHome>/heartbeat.json`; override composition keys (such as `prompt`) with an **id-only override entry, no insert** — see below.
 
 ## Settings sidebar icon
 
-The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `stroke-width: 1.3` (the shared `ICON_MEDIUM_STROKE`), pure-black alpha painted through `mask-image` so the visible color follows `currentColor` in both light and dark themes. It matches the dsh-plugin-memory icon spec exactly. The official `settings.section` slot projects only id / order / label — there is no icon field — so the plugin claims its own nav row by exact label text, mirrors it with a `MutationObserver` (re-claimed after a language switch or remount) and cleans everything up on dispose.
+The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `stroke-width: 1.3` (the shared `ICON_MEDIUM_STROKE`), pure-black alpha painted through `mask-image` so the visible colour follows `currentColor` in both light and dark themes. It matches the dsh-plugin-memory icon spec exactly. The official `settings.section` slot projects only id / order / label — there is no icon field — so the plugin claims its own nav row by the exact **localized** label text (`心跳` or `Heartbeat`), mirrors it with a `MutationObserver` (re-claimed after a language switch — the claim key changes with the label — or a remount) and cleans everything up on dispose.
 
 ## Version requirements
 
 - **DSH: official 0.2.1-rc.5 series.** `package.json` declares `engines.dsh: "^0.2.1-rc.5"`; the host gates with semver (`includePrerelease: true`), so mind prerelease semantics: `^0.2.1` / `>=0.2.0` **do not match** `0.2.1-rc.5`; only `^0.2.1-rc.5` does. It also covers the eventual 0.2.1 stable, while `0.3.0-rc.1` is judged incompatible.
-- **session format v4** (official 0.1.7+). The heartbeat source uses the producer-owned kind `plugin:heartbeat`; v4's native admission rejects the v3 `{kind:'plugin', plugin:'heartbeat'}` wrapper with `format v4 message requires a producer-owned source kind` (wrapped as `code: "UNKNOWN"`, shown as `... source kind UNKNOWN` — `UNKNOWN` is the error code, not a kind). The v4 and v3 allowlists are mutually exclusive.
-- **0.4.2 is the last v3-compatible version**; **from 0.5.0 the plugin supports only the official DSH 0.2.1-rc.5 series** (session format v4 + the host APIs verified offline). Older 0.2.x without `sessionProjections` degrades automatically but is not verified version by version; 0.3.x is not supported yet.
-- **Verified on a real host** (DSH Desktop 0.2.1-rc.5, live): **heartbeat delivery + task snapshot injection** work — in a real session both `todos` and the Agent Team board were injected with correct `ready` / `blockedBy`, source `plugin:heartbeat` passed v4 admission, and the settings panel `GET/POST /api/heartbeat/config` was exercised live and applied hot. Note: the pre-beat compaction path is covered by unit tests only and was not separately observed on a live host.
+- **session format v4** (official 0.1.7+). The heartbeat source uses the producer-owned kind `plugin:heartbeat`; v4's native admission rejects the v3 `{kind:'plugin', plugin:'heartbeat'}` wrapper. The v4 and v3 allowlists are mutually exclusive.
+- **0.4.2 is the last v3-compatible version**; **from 0.5.0 the plugin supports only the official DSH 0.2.1-rc.5 series**. 0.3.x is not supported yet.
+- **Verified on a real host** (DSH Desktop 0.2.1-rc.5, v0.6.0 build loaded after restart):
+  - `GET /api/heartbeat/status` → 200 with both live sessions (`sessionId` / `cwd` / `nextBeatAt` / budget / history), and `/api/heartbeat/config` returns the **v2** config;
+  - an existing v1 `heartbeat.json` was migrated automatically (`intervalSeconds` → `baseIntervalSeconds`, plus the new mode / quiet-hours / budget fields) and `heartbeat-vitals.json` was created;
+  - **silent pulses work**: with the interval temporarily at 60 s, both sessions recorded an `L0 · no new signal · delivered: false` vitals row while the daily budget stayed at 0 (zero injections); the 600 s / jitter 60 s config was restored afterwards;
+  - **hot-plug**: `dsh plugin remove` while running turned `/status` from 200 into 401 (route gone, no crash), and `add` brought it back to 200 with the session restored;
+  - **control route**: an unknown action returns 400, `snooze` sets `snoozeUntil`, `reset` clears it;
+  - the sidebar heart and the `Heartbeat` section render correctly.
+  **Not separately verified on a live host** (unit tests only): event-driven latency (≤10 s), pre-beat compaction, and a real L2 question delivery. The v0.6 autonomy layer is covered by the 116-test suite.
 
-## Configuration
+## Configuration (v2)
+
+The user config lives in `<dshHome>/heartbeat.json` (written by the panel or by hand; validated with schemastery). Composition config is the base layer, the user file overrides it, and a matching `workspaces` entry overrides both.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | master switch (user layer lives in `<dshHome>/heartbeat.json`) |
-| `intervalSeconds` | `600` | initial beat period (clamped to 30–86400 s); later backoff tiers are ×2 / ×3 |
-| `pauseAfterMissed` | `3` | hard-stop threshold: after N beats with no human reply the timer is torn down; your next message revives it and restarts from the initial tier. `0` = off |
-| `taskNudge` | `true` | task inspection: read the session's todos / team board / goal each beat and inject the snapshot + ask instruction; both disappear when off (user-layer configurable) |
-| `taskNudgeMaxItems` | `5` | per-bucket item cap in the task snapshot, 1–20 (user-layer configurable) |
-| `backoffSeconds` | unset | explicit backoff tier array (e.g. `[600, 900, 1800]`, composition only) |
-| `compactBeforeBeat` | `true` | fold history into a checkpoint summary before delivery (composition only; skipped when no compaction service) |
-| `maxBeatsPerHour` | `0` | beat cap per 60-minute sliding window (`0` = off, composition only) |
-| `prompt` | built-in | instruction template delivered on each beat; `{{time}}` → current time, `{{tasks}}` → task snapshot (composition only) |
-| `configFile` | `<dshHome>/heartbeat.json` | user config path (`enabled` / `intervalSeconds` / `pauseAfterMissed` / `taskNudge` / `taskNudgeMaxItems`) |
+| `enabled` | `true` | master switch |
+| `mode` | `"assist"` | `"assist"` = speak on signals; `"silent"` = never speak (pulses still run and are recorded) |
+| `baseIntervalSeconds` | `600` | base pulse interval (30–86400 s); the per-missed backoff tiers scale from it |
+| `pauseAfterMissed` | `3` | hard stop after N unanswered beats (0 = off); your next message revives it |
+| `backoffSeconds` | `null` | explicit backoff tier array (`null` = derive `[base, 2×base, 3×base]`) |
+| `compactBeforeBeat` | `true` | fold long history into a checkpoint before speaking (best-effort) |
+| `maxBeatsPerHour` | `0` | sliding hourly cap on delivered beats (0 = off) |
+| `maxBeatsPerDay` | `12` | daily budget of delivered beats (0 = unlimited), shared across sessions in the process |
+| `dedupeWindowMinutes` | `90` | never re-ask the same signal key inside this window (0 = off) |
+| `refractorySeconds` | `300` | minimum silence after a delivery before the next beat |
+| `jitterSeconds` | `60` | deterministic per-session jitter (0–600 s) so sessions spread out |
+| `restartCooldownSeconds` | `300` | after a restart, stay silent this long even if signals are waiting |
+| `quietHours` | `{"start":"23:00","end":"08:00"}` | never speak inside this window (overnight windows supported; `null` disables) |
+| `taskNudge` | `true` | include the task snapshot + ask instruction in beats |
+| `taskNudgeMaxItems` | `5` | per-bucket item cap in the task snapshot (1–20) |
+| `l3Allow` | `[]` | granted L3 categories: `read` / `test` / `notes` / `continue` |
+| `prompt` | `null` | custom prompt template (`{{time}}` / `{{tasks}}` / `{{reason}}`); `null` = built-in per-level prompt |
+| `workspaces` | `{}` | per-workspace overrides keyed by the session's absolute cwd |
+
+A `workspaces` entry accepts: `enabled`, `mode`, `baseIntervalSeconds`, `quietHours` (object or `null`), `maxBeatsPerDay`, `l3Allow`. Precedence: composition config < user config < matching workspace override.
+
+**v1 → v2 migration**: a v1 file (`intervalSeconds`, no `version`) is migrated on load — `intervalSeconds` becomes `baseIntervalSeconds`, the other fields keep their meaning, missing keys take the v2 defaults — and is written back as v2. A corrupt config file is ignored (the last good config stays in memory, defaults on the next start); unrecognised keys are not persisted. Runtime state is separate: `<dshHome>/heartbeat-vitals.json`.
 
 Custom heartbeat prompt (composition config, **no `insert`**, to avoid duplicating the bundle layer):
 
@@ -106,14 +204,12 @@ Custom heartbeat prompt (composition config, **no `insert`**, to avoid duplicati
 - id: dsh-heartbeat
   config:
     prompt: |
-      【Heartbeat】the current time is {{time}}. Take a look at the recent
-      conversation and the todos: report progress if any, risks if any;
-      otherwise a single line. 5 sentences at most.
+      【Heartbeat】{{time}} — why now: {{reason}}
+      {{tasks}}
+      Report progress/risks briefly; ask before doing anything.
 ```
 
-To place the task block exactly where you want it, put `{{tasks}}` in your custom prompt; omit it and the block is appended at the end while `taskNudge` is on.
-
-> Why not the generic settings namespace? DSH's settings wire serves only a hard-coded allowlist (`WEB_SETTINGS_NAMESPACES`); a plugin cannot expose its own namespace to the browser for writes. This plugin therefore hosts `GET/POST /api/heartbeat/config` in the host process; the **Heartbeat** section in Settings talks to that route directly, and writes apply hot.
+`{{time}}`, `{{tasks}}` and `{{reason}}` are substituted. A template without `{{tasks}}` gets the task block appended; a template without `{{reason}}` gets the why-now line appended.
 
 ## Development
 
@@ -121,22 +217,23 @@ To place the task block exactly where you want it, put `{{tasks}}` in your custo
 node --test
 ```
 
-No-arg `node --test` discovers `test/*.test.mjs` (`runtime.test.mjs` + `tasks.test.mjs` + `settings-nav-icon.test.mjs` + `client-half.test.mjs`) — 74 tests at the moment.
+No-arg `node --test` discovers `test/*.test.mjs`; the suite covers `runtime`, `tasks`, `sensors`, `rhythm`, `gate`, `vitals`, `config-store-v2`, `prompt-levels`, `wiring-v06`, `settings-nav-icon` and `client-half` — **116 tests** at the moment.
+
+Design and implementation notes live in the repo (not shipped in the npm package): `docs/specs/2026-10-30-heartbeat-v0.6-design.md` and `docs/plans/2026-10-30-heartbeat-v0.6.md`.
 
 ## Known limits
 
 - The heartbeat only exists while the DSH process is alive (it stops when the app quits).
-- Each session (root agent) has its own timer; subagents never get a heartbeat.
-- When the plugin is hot-mounted/reloaded after sessions are already open, it does one idempotent catch-up attach over existing root agents (no double timers); sessions opened afterwards still go through `agent/created`.
-- The heartbeat **does not interrupt** running work; it speaks up as soon as the current turn ends.
-- The heartbeat is a "report", not a "new task": the default prompt tells it not to start work on its own.
-- Task inspection also only asks: actually doing the items still needs your go-ahead in the beat's question.
-- `taskNudge: false` is a full switch: no task snapshot and no inspection / ask instruction in the beat — only the generic report prompt remains.
-- The task snapshot comes from host session projections and is a **read-only** live view; hosts without that service (older DSH) degrade to a prompt-only heartbeat instead of erroring.
-- One already-queued beat (while the agent was busy) is consumed when the current turn ends — there is never a new beat after that hard stop.
-- Zero coupling with dsh-plugin-memory; when both are installed, their messages queue in the same inbox and do not conflict.
-- The plugin depends on the **agent-loop driver surface** `agent.followup` / `agent.inbox` — not part of DSH's public API catalog — and is pinned to DSH 0.2.x; if the host changes the implementation, at worst one beat is dropped with a warning instead of throwing from the timer.
-- **Version requirement**: official DSH 0.2.1-rc.5 series, session format v4; `package.json` declares `engines.dsh: "^0.2.1-rc.5"` — see "Version requirements" above.
+- Each root agent has its own runtime; subagents never get a heartbeat.
+- **By default the heartbeat is quiet**: if nothing changes, it says nothing. "Presence" now comes from the panel's vitals view and the Beat now button, not from scheduled chatter — raise `mode`/dedupe/quiet settings if you want more voice.
+- L3 is **not a sandbox** — it only changes the instruction; irreversible actions are still stopped by host approval.
+- Runtime state (`heartbeat-vitals.json`) is process-local with atomic writes and a short debounce; two DSH processes sharing one home are best-effort, not strongly consistent.
+- Event-driven beats need `sessionProjections.onChanged`; without it the plugin is timer-only (same gating, just less reactive).
+- When the plugin is hot-mounted after sessions are already open, it does one idempotent catch-up attach over existing root agents; sessions opened afterwards go through `agent/created`.
+- The plugin depends on the **agent-loop driver surface** `agent.followup` / `agent.inbox` — not part of DSH's public API catalog — and is pinned to DSH 0.2.x; if the host changes the implementation, at worst one beat is dropped with a warning.
+- `taskNudge: false` removes both the snapshot and the inspection/ask instruction from beats.
+- Zero coupling with dsh-plugin-memory; when both are installed their messages share the same inbox queue and do not conflict.
+- **Version requirement**: official DSH 0.2.1-rc.5 series, session format v4; `engines.dsh: "^0.2.1-rc.5"` — see "Version requirements" above.
 
 ## License
 

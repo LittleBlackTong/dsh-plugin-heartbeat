@@ -2,6 +2,37 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.6.0] - 2026-10-30
+
+### Added（自主神经）
+
+- **新模块**：`lib/sensors.js`（投影 diff → 信号 + arousal，FNV-1a 稳定指纹）、`lib/rhythm.js`（arousal / 不应期 / 静默时段 / 退避 / jitter）、`lib/gate.js`（等级判定 / 去重窗口 / 每日预算 / 礼貌闸门）、`lib/vitals.js`（运行态持久化 `heartbeat-vitals.json`：tmp+rename 原子写、2s 防抖、每会话 10 条历史、200 条去重账本、重启冷却判定）。
+- **自主等级 L0–L4**：L0 静默拍**不注入任何消息**（只记 vitals）；L1 汇报进展/风险；L2 用 `ask_user_question` 问你要不要做；L4 对同一决策信号「已提醒过仍无回应」（`missed ≥ 2`）升级措辞、不加频；L3 类别授权（`read` / `test` / `notes` / `continue`，默认空）只做指令级授权，**不是沙箱**，不可逆操作仍由宿主 approval 拦截。
+- **信号与 arousal**：团队任务变可开始 +5、变被阻塞 +4、目标受阻/暂停 +4、待回答提问 +3、待办变化 +2、团队任务完成 +1；`arousal = clamp(Σ, 0, 8)`，越高间隔越短。抑制条件：你刚说过话（2 分钟内）、上下文压力 > 0.9、静默时段、禁用/打盹/暂停、`mode: silent`。
+- **节律**：`baseIntervalSeconds`（默认 600）、退避档位、arousal 调频（arousal 4 → 间隔 ×1/3）、`refractorySeconds`（默认 300）、`jitterSeconds`（默认 60，确定性）、`restartCooldownSeconds`（默认 300）、静默时段默认 `23:00–08:00`。
+- **去重与预算**：`dedupeWindowMinutes`（默认 90，同一信号键不重复问）、`maxBeatsPerDay`（默认 12，`0` = 不限，进程内跨会话共享）。
+- **事件驱动**：订阅 `sessionProjections.onChanged`（`todos` / `agentTeam` / `goal` / `userQuestions`）→ 2s 防抖后额外一拍，仍过全部门控；服务不可用自动退化为纯定时器模式。
+- **可观测与控制**：`GET /api/heartbeat/status`、`POST /api/heartbeat/control`（`beat-now` / `snooze` / `pause` / `resume` / `reset`）；设置面板新增**生命体征**（状态 / 下次 ETA / 今日预算 / 最近 5 拍）+ 控制按钮；面板文案走 **DSH 语言包**（client 注入 `locale`、注册 `heartbeat` 命名空间 zh/en、slot 声明 `locale: 'heartbeat'`，跟随「设置 → 通用设置 → 语言」并即时重渲染），侧栏 label 也跟随语言（中文「心跳」/ 英文 `Heartbeat`），爱心图标不变且认领键随语言切换自动更新。
+- **配置 v2**：`mode` / `baseIntervalSeconds` / `quietHours` / `dedupeWindowMinutes` / `maxBeatsPerDay` / `refractorySeconds` / `restartCooldownSeconds` / `jitterSeconds` / `l3Allow` / `workspaces`；v1 `heartbeat.json` 加载时**自动迁移**并回写 v2；工作区覆盖按 `session.header.cwd`，优先级 composition < 用户配置 < 工作区覆盖。
+- 自定义 `prompt` 新增 `{{reason}}` 占位符（why-now 一行）。
+
+### Changed（默认行为变化）
+
+- **默认行为从「按间隔必说话」改为「静默拍」**：没有信号时走 L0、**不注入任何消息**，只有检测到变化才按 L1/L2/L4 开口。0.5.x 的「每拍都汇报」不再是默认；想更活跃可调 `mode` / 去重 / 静默时段。
+- **面板文案与侧栏 label 改为跟随 DSH 语言设置**：不再用 `navigator.language` 猜（Electron 里常是 en-US、与 App 语言不一致），改为注册 `heartbeat` 语言包并跟随「设置 → 通用设置 → 语言」，默认回退中文；侧栏 label 也走语言包（中文「心跳」/ 英文 `Heartbeat`），语言切换后 `MutationObserver` 自动重新认领爱心标记。
+- **配置字段重命名**：`intervalSeconds` → `baseIntervalSeconds`（v1 文件自动迁移，无需手工处理）；配置升为 v2。
+- **消息格式**：新增「为什么现在叫你：`{{reason}}`」一行，分级指令取代单一默认提示词；自定义 prompt 仍兼容 `{{time}}` / `{{tasks}}`，并新增 `{{reason}}`。
+- 双语文档（`README.md` / `README.zh.md`）全面更新到 v0.6 口径：自主等级、信号/去重/预算、生命体征与控制、配置 v2 全表与 v1→v2 迁移；爱心图标小节保持。
+
+### Fixed
+
+- 本版无新增修复项（0.5.1 的 pre-beat 压缩 `AbortSignal`、热挂载补齐、`runtimes` Map 泄漏等修复原样沿用，不在此复述）。
+
+### Tests
+
+- 新增 `test/sensors.test.mjs`、`test/rhythm.test.mjs`、`test/gate.test.mjs`、`test/vitals.test.mjs`、`test/config-store-v2.test.mjs`、`test/prompt-levels.test.mjs`、`test/wiring-v06.test.mjs`；`test/client-half.test.mjs` 扩展面板契约（生命体征 / 控制 / i18n），并补「zh/en 语言包 key 对齐、slot 声明 `locale: 'heartbeat'`、`inject` 含 `locale`」与 `sidebar label and icon follow a language switch`（切语言后 label 变「心跳」/`Heartbeat`、MutationObserver 重新认领）用例。
+- 全量单测 **116/116 通过**（`node --test`）。
+
 ## [0.5.1] - 2026-10-30
 
 ### Added
