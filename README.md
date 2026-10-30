@@ -129,6 +129,8 @@ Buttons (POST `/api/heartbeat/control`):
 | **Resume** | lift pause / snooze and re-arm from the current rhythm |
 | **Reset** | clear snooze + pause and resume |
 
+![Heartbeat panel controls](assets/settings-config.png)
+
 Routes (loopback, plugin-owned):
 
 | Method | Path | Purpose |
@@ -144,6 +146,8 @@ The panel's wording is localised through DSH's own locale layer: the client half
 ### Diagnostics (v0.8.0)
 
 The panel can answer "why didn't it say anything?" without digging through logs: a diagnostics block lists the **last 5 pulses** with time, level and **reason** (e.g. `没有新信号`, `静默时段`, `proactive-cooldown（让位给 memory）`, `child-active`), and shows **who currently holds the speech floor** from the status route's new `lock` field — so a quiet run is explainable at a glance. The L3 section also summarises the granted categories instead of only showing the checkboxes.
+
+![Heartbeat diagnostics](assets/settings-diagnostics.png)
 
 
 ## Speech arbitration with other plugins (v0.7.0)
