@@ -5,12 +5,16 @@ export interface HeartbeatConfig {
   enabled?: boolean
   /** Heartbeat period in seconds, clamped to 30–86400. Default `600`. */
   intervalSeconds?: number
-  /** Instruction template delivered on each beat; `{{time}}` is substituted. */
+  /** Instruction template delivered on each beat; `{{time}}` / `{{tasks}}` are substituted. */
   prompt?: string
   /** Pause after this many unanswered beats; a real user message resumes. 0 disables. Default `3`. */
   pauseAfterMissed?: number
   /** Absolute path of the user config file (default `<dshHome>/heartbeat.json`). */
   configFile?: string
+  /** v0.5.0: inspect the session's task projections on every beat and ask before acting. Default `true`. */
+  taskNudge?: boolean
+  /** v0.5.0: per-bucket item cap in the injected task snapshot (1–20). Default `5`. */
+  taskNudgeMaxItems?: number
 }
 
 export const name: 'heartbeat'

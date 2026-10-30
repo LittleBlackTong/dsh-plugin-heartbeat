@@ -103,8 +103,12 @@ test('Config schema applies defaults and bounds', () => {
   assert.equal(resolved.compactBeforeBeat, true)
   assert.equal(resolved.maxBeatsPerHour, 0)
   assert.equal(resolved.backoffSeconds, undefined)
+  assert.equal(resolved.taskNudge, true)
+  assert.equal(resolved.taskNudgeMaxItems, 5)
   assert.throws(() => Config({ intervalSeconds: 5 }))
   assert.throws(() => Config({ intervalSeconds: 90000 }))
+  assert.throws(() => Config({ taskNudgeMaxItems: 0 }))
+  assert.throws(() => Config({ taskNudgeMaxItems: 21 }))
 })
 
 test('buildSchedule: derived tiers from intervalSeconds × pauseAfterMissed', () => {
@@ -144,8 +148,9 @@ test('renderPrompt substitutes {{time}}', () => {
 test('buildHeartbeatMessage has the harness shape', () => {
   const message = buildHeartbeatMessage('hi')
   assert.equal(message.role, 'user')
-  assert.equal(message.source.kind, 'plugin')
-  assert.equal(message.source.plugin, 'heartbeat')
+  // Session format v4 admits only a producer-owned kind; the retired
+  // {kind:'plugin', plugin:'heartbeat'} wrapper is rejected at adoption.
+  assert.deepEqual(message.source, { kind: 'plugin:heartbeat' })
   assert.deepEqual(message.content, [{ type: 'text', text: 'hi' }])
   assert.match(message.id, /^hb-/)
 })
@@ -167,7 +172,7 @@ test('idle tick opens a turn via followup', () => {
   assert.equal(agent.followed.length, 1)
   const message = agent.followed[0]
   assert.equal(message.role, 'user')
-  assert.equal(message.source.kind, 'plugin')
+  assert.deepEqual(message.source, { kind: 'plugin:heartbeat' })
   assert.match(message.content[0].text, /beat /)
 })
 
@@ -407,6 +412,8 @@ test('apply registers the config route on the web server', () => {
   const dispose = apply(ctx, { intervalSeconds: 900 })
   const web = injected.find(({ deps }) => deps[0] === 'webServer')
   assert.ok(web, 'webServer injection registered')
+  const projectionsInject = injected.find(({ deps }) => deps[0] === 'sessionProjections')
+  assert.ok(projectionsInject, 'sessionProjections injection registered (v0.5.0 task inspection)')
   const { deps, callback } = web
   assert.deepEqual(deps, ['webServer'])
   const injectedCtx = {
@@ -423,6 +430,86 @@ test('apply registers the config route on the web server', () => {
   const route = routes.get(CONFIG_ROUTE_PATH)
   assert.equal(route.kind, 'exact')
   dispose()
+})
+
+test('apply catches up with agents that already exist (hot mount)', () => {
+  const listeners = new Map()
+  const registry = agentRegistry()
+  const ctx = {
+    logger: { info: () => {}, warn: () => {} },
+    agents: registry,
+    on: (event, callback) => {
+      const key = Symbol()
+      listeners.set(key, { event, callback })
+      return () => listeners.delete(key)
+    },
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    inject: () => {},
+  }
+  const live = new FakeAgent('live-before-mount')
+  registry.add(live)
+  apply(ctx, { intervalSeconds: 600 })
+  assert.equal(live._cleanups.length, 1, 'existing root agent got a runtime')
+  // an agent/created for the same agent must not double-attach
+  for (const { event, callback } of [...listeners.values()]) {
+    if (event !== 'agent/created') continue
+    callback({ agent: live })
+  }
+  assert.equal(live._cleanups.length, 1, 'attach is idempotent')
+})
+
+test('a subagent that predates the mount is not attached', () => {
+  const registry = agentRegistry()
+  const ctx = {
+    logger: { info: () => {}, warn: () => {} },
+    agents: registry,
+    on: () => () => {},
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    inject: () => {},
+  }
+  const root = new FakeAgent('root')
+  const sub = new FakeAgent('sub')
+  registry.add(root)
+  registry.add(sub)
+  registry.roots = () => [root] // sub is not a root
+  apply(ctx, { intervalSeconds: 600 })
+  assert.equal(root._cleanups.length, 1)
+  assert.equal(sub._cleanups.length, 0)
+})
+
+test('agent teardown disposes its runtime, then plugin dispose is a no-op', async () => {
+  const listeners = new Map()
+  const registry = agentRegistry()
+  const ctx = {
+    logger: { info: () => {}, warn: () => {} },
+    agents: registry,
+    on: (event, callback) => {
+      const key = Symbol()
+      listeners.set(key, { event, callback })
+      return () => listeners.delete(key)
+    },
+    effect: (callback) => {
+      const cleanup = callback()
+      return cleanup
+    },
+    inject: () => {},
+  }
+  const dispose = apply(ctx, { intervalSeconds: 600 })
+  const agent = new FakeAgent('teardown')
+  registry.add(agent)
+  for (const { event, callback } of [...listeners.values()]) {
+    if (event === 'agent/created') callback({ agent })
+  }
+  assert.equal(agent._cleanups.length, 1)
+  agent.disposeCtx() // agent-scoped effect disposer: runtime dead + map entry gone
+  await dispose() // must not throw or double-dispose
+  assert.equal(agent._cleanups.length, 0)
 })
 
 test('config route: GET serves the store, POST updates it, bad input rejects', async () => {
@@ -485,15 +572,35 @@ test('config route: GET serves the store, POST updates it, bad input rejects', a
 
   const initial = await get()
   assert.equal(initial.status, 200)
-  assert.deepEqual(JSON.parse(initial.body), { enabled: true, intervalSeconds: 900, pauseAfterMissed: 3 })
+  assert.deepEqual(JSON.parse(initial.body), {
+    enabled: true,
+    intervalSeconds: 900,
+    pauseAfterMissed: 3,
+    taskNudge: true,
+    taskNudgeMaxItems: 5,
+  })
 
   const updated = await post(JSON.stringify({ intervalSeconds: 120 }))
   assert.equal(updated.status, 200)
-  assert.deepEqual(JSON.parse(updated.body), { enabled: true, intervalSeconds: 120, pauseAfterMissed: 3 })
+  assert.deepEqual(JSON.parse(updated.body), {
+    enabled: true,
+    intervalSeconds: 120,
+    pauseAfterMissed: 3,
+    taskNudge: true,
+    taskNudgeMaxItems: 5,
+  })
+
+  const nudged = await post(JSON.stringify({ taskNudge: false, taskNudgeMaxItems: 2 }))
+  assert.equal(nudged.status, 200)
+  assert.equal(JSON.parse(nudged.body).taskNudge, false)
+  assert.equal(JSON.parse(nudged.body).taskNudgeMaxItems, 2)
 
   const bad = await post(JSON.stringify({ intervalSeconds: 1 }))
   assert.equal(bad.status, 400)
   assert.match(JSON.parse(bad.body).error, /expected number/)
+
+  const badNudge = await post(JSON.stringify({ taskNudgeMaxItems: 21 }))
+  assert.equal(badNudge.status, 400)
 
   fs.rmSync(file, { force: true })
 })
@@ -601,14 +708,55 @@ test('hourly cap skips beats beyond the budget without pausing', () => {
 test('pre-beat compaction runs for an idle agent when available', async () => {
   const agent = new FakeAgent()
   const calls = []
-  const compaction = { compactNow: async () => { calls.push('compact'); return { ok: true } } }
+  const compaction = {
+    compactNow: async (_agent, signal) => {
+      calls.push({ kind: 'compact', signal })
+      return { ok: true }
+    },
+  }
   const runtime = new HeartbeatRuntime(agent, {
     readConfig: () => config(),
     getCompaction: () => compaction,
   })
   await runtime.tick()
-  assert.deepEqual(calls, ['compact'])
+  assert.deepEqual(calls.map((call) => call.kind), ['compact'])
   assert.equal(agent.followed.length, 1)
+  // 0.2.x contract: compactNow(agent, signal, …) requires a real AbortSignal —
+  // `undefined` throws inside the implementation before its own try/catch.
+  assert.ok(calls[0].signal instanceof AbortSignal, 'a real AbortSignal is passed to compactNow')
+})
+
+test('overlapping ticks wait for the in-flight compacted delivery', async () => {
+  const agent = new FakeAgent()
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const compaction = { compactNow: async () => { await gate; return { ok: true } } }
+  const runtime = new HeartbeatRuntime(agent, {
+    readConfig: () => config(),
+    getCompaction: () => compaction,
+  })
+  const first = runtime.tick()
+  assert.equal(runtime.delivering, true)
+  const second = runtime.tick() // mutex: must not start a second delivery
+  assert.equal(second, undefined)
+  release()
+  await first
+  assert.equal(agent.followed.length, 1)
+  assert.equal(runtime.delivering, false)
+})
+
+test('a host without the followup/inbox driver surface is warned, not thrown', () => {
+  const agent = new FakeAgent()
+  agent.followup = undefined
+  const warnings = []
+  const runtime = new HeartbeatRuntime(agent, {
+    readConfig: () => config(),
+    logger: { info: () => {}, warn: (message) => warnings.push(message) },
+  })
+  assert.doesNotThrow(() => runtime.tick())
+  assert.match(warnings.join('\n'), /no followup\/inbox surface/)
 })
 
 test('pre-beat compaction is skipped when disabled', async () => {
@@ -634,4 +782,106 @@ test('pre-beat compaction failure never blocks the beat', async () => {
   })
   await runtime.tick()
   assert.equal(agent.followed.length, 1)
+})
+
+// ── v0.5.0: session task inspection ────────────────────────────────────────
+
+const projectionState = (values) => ({
+  stateOf: (_session, key) => values[key],
+})
+
+const withSession = (agent) => {
+  agent.session = { id: `session-${agent.id}` }
+  return agent
+}
+
+test('a beat injects the session task snapshot and asks before acting', () => {
+  const agent = withSession(new FakeAgent())
+  const projections = projectionState({
+    todos: [
+      { content: '写 0.5.0 实现', status: 'in_progress' },
+      { content: '补单测', status: 'pending' },
+      { content: '已完成的事', status: 'completed' },
+    ],
+    agentTeam: {
+      tasks: [
+        { id: 'task-1', subject: '实现', status: 'in_progress', blockedBy: [] },
+        { id: 'task-2', subject: '发布', status: 'pending', blockedBy: ['task-1'] },
+      ],
+    },
+    goal: { current: { goal: { objective: '把 heartbeat 升到 0.5.0', phase: 'active' } } },
+  })
+  const runtime = new HeartbeatRuntime(agent, {
+    readConfig: () => config(),
+    getProjections: () => projections,
+  })
+  runtime.tick()
+  const text = agent.followed[0].content[0].text
+  assert.match(text, /beat /)
+  assert.match(text, /会话任务巡检/)
+  assert.match(text, /进行中：写 0\.5\.0 实现/)
+  assert.match(text, /待办：补单测/)
+  assert.doesNotMatch(text, /已完成的事/)
+  assert.match(text, /task-1 实现 \[进行中\]/)
+  assert.match(text, /task-2 发布 \[被阻塞（task-1）\]/)
+  assert.match(text, /当前目标（active）：把 heartbeat 升到 0\.5\.0/)
+  assert.match(text, /ask_user_question/)
+  assert.match(text, /不擅自开工/)
+})
+
+test('taskNudge: false keeps the beat free of task inspection text', () => {
+  const agent = withSession(new FakeAgent())
+  const projections = projectionState({ todos: [{ content: '补单测', status: 'pending' }] })
+  const runtime = new HeartbeatRuntime(agent, {
+    readConfig: () => config({ taskNudge: false }),
+    getProjections: () => projections,
+  })
+  runtime.tick()
+  const text = agent.followed[0].content[0].text
+  assert.doesNotMatch(text, /会话任务巡检/)
+  assert.doesNotMatch(text, /ask_user_question/)
+})
+
+test('missing or broken projection registry degrades to a hint, never drops the beat', () => {
+  const agent = withSession(new FakeAgent())
+  const broken = { stateOf: () => { throw new Error('projection exploded') } }
+  for (const getProjections of [undefined, () => undefined, () => broken]) {
+    agent.followed = []
+    const runtime = new HeartbeatRuntime(agent, {
+      readConfig: () => config(),
+      getProjections,
+      logger: { info: () => {}, warn: () => {} },
+    })
+    runtime.tick()
+    assert.equal(agent.followed.length, 1)
+    const text = agent.followed[0].content[0].text
+    assert.match(text, /没检测到未完成的待办/)
+  }
+})
+
+test('taskNudgeMaxItems caps each snapshot bucket', () => {
+  const agent = withSession(new FakeAgent())
+  const projections = projectionState({
+    todos: [
+      { content: 't1', status: 'pending' },
+      { content: 't2', status: 'pending' },
+      { content: 't3', status: 'pending' },
+    ],
+    agentTeam: {
+      tasks: [
+        { id: 'task-1', subject: 'a', status: 'pending', blockedBy: [] },
+        { id: 'task-2', subject: 'b', status: 'pending', blockedBy: [] },
+      ],
+    },
+  })
+  const runtime = new HeartbeatRuntime(agent, {
+    readConfig: () => config({ taskNudgeMaxItems: 1 }),
+    getProjections: () => projections,
+  })
+  runtime.tick()
+  const text = agent.followed[0].content[0].text
+  assert.match(text, /待办：t1/)
+  assert.doesNotMatch(text, /待办：.*t2/)
+  assert.match(text, /团队任务：task-1 a/)
+  assert.doesNotMatch(text, /团队任务：.*task-2/)
 })
