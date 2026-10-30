@@ -1,135 +1,142 @@
 # dsh-plugin-heartbeat
 
+**English** ｜ [中文](README.zh.md)
+
+<p align="center">
+  <a href="https://github.com/LittleBlackTong/dsh-plugin-heartbeat"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-LittleBlackTong%2Fdsh--plugin--heartbeat-blue?logo=github"></a>
+  <a href="https://www.npmjs.com/package/dsh-plugin-heartbeat"><img alt="npm" src="https://img.shields.io/npm/v/dsh-plugin-heartbeat?logo=npm"></a>
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
+  <img alt="node" src="https://img.shields.io/badge/node-%3E%3D18-green">
+</p>
+
 > A heartbeat plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): wakes the agent on a configurable interval so it proactively reports progress, risks, and blockers — and, before each beat, inspects the session's own todos, team board and goal so it can ask whether to act — or just checks in.
 
-DeepSeek Harness 的「心跳」插件：给 agent 装一个定时唤醒的闹钟，让它**主动**开口 —— 汇报进展、风险、卡点，或者没事贫两句。v0.5.0 起每拍还会先做一次**任务巡检**：读会话里的待办、团队任务和目标，把快照塞进心跳，让 agent 来问你要不要动手。类似 OpenClaw 的心跳模式。
+A Cordis plugin for DeepSeek Harness: put a timed alarm on your agent so it **proactively** speaks up — progress, risks, blockers, or just a casual check-in. Since v0.5.0 every beat also runs a **task inspection**: it reads the session's todos, team board and goal, folds them into a compact snapshot, and lets the agent ask whether you want it to act. In the spirit of OpenClaw's heartbeat mode.
 
-## 怎么工作
+## How it works
 
-- Host 平面的 Cordis 插件，监听 `agent/created`，给每个 **root agent**（子 agent 跳过）挂一个独立定时器。
-- **热挂载补齐（v0.5.0）**：插件在会话已经开着时才被挂载/热重载（`dsh plugin add`、市场安装、profile live reload 都属于这种）时，只监听 `agent/created` 会永远错过这些已存在的会话。`apply()` 里除监听事件外，还会对 `ctx.agents.roots()` 当前的 root agent 做一次**幂等补挂**，已打开的会话照样开始心跳（子 agent 仍跳过）。
-- 每次心跳通过 `agent.followup()` 注入一条合成 user 消息（session format v4 的 producer-owned kind：`source.kind === 'plugin:heartbeat'`）：
-  - **agent 空闲** → 立即开新一轮，主动说话；
-  - **agent 忙** → 消息排队，当前轮结束立刻处理 —— **不打断、不丢失**；
-  - 连续忙时多拍心跳 → 只保留一条待处理（`inbox.replace` 原地替换，不堆积）。
-- **退避间隔（v0.4.0）**：初始 10 分钟；无人回复则下一拍 20 分钟、再下一拍 30 分钟（`[base, 2×base, 3×base]` 自动推导，可 `backoffSeconds` 显式覆盖）。冷场越久，吵得越稀。
-- **硬停保证（v0.4.0，token 保护）**：连续 `pauseAfterMissed`（默认 3）拍没有真人回复 → **拆掉定时器彻底停止**，绝不再投递；只有你的下一条消息能复活它，并从初始 10 分钟档**重新计时**。聊天活跃时每次你说话都会重置相位——心跳只在真正的冷场后才开口。
-- **轻量唤醒（v0.4.0）**：投递前先请宿主的 compaction 服务把长历史压成 checkpoint 摘要（`compactBeforeBeat`，默认开，失败不影响投递），注入的指令明确「不调工具、不复盘历史、≤5 句」——每拍消耗的上下文尽量小。
-- **每小时封顶（可选）**：`maxBeatsPerHour`（默认 0=关）给任何 60 分钟窗口设心跳上限，防「断续回复反复重置退避」的极端烧法。
-- **任务巡检（v0.5.0）**：每拍投递前读一次会话投影（待办 / 团队任务板 / 目标），把未完成事项压成快照塞进心跳，并指示 agent **只提问、不擅自开工**。详见下一节。
-- 注入的消息在对话流里渲染为一条折叠的 context 小行，不是整块用户气泡。
+- Host-plane Cordis plugin: listens for `agent/created` and attaches an independent timer to every **root agent** (subagents are skipped).
+- **Hot-mount catch-up (v0.5.0)**: when the plugin is mounted/reloaded while sessions are already live (`dsh plugin add`, market install, profile live reload all do this), `agent/created` alone would never see those sessions. So `apply()` also does one **idempotent catch-up attach** over `ctx.agents.roots()`; existing sessions start beating too (subagents still skipped).
+- Each beat injects a synthetic user message through `agent.followup()` (session format v4 producer-owned kind: `source.kind === 'plugin:heartbeat'`):
+  - **agent idle** → a fresh turn opens immediately, so it speaks up on its own;
+  - **agent busy** → the message parks and is claimed the moment the current turn ends — **no interruption, nothing lost**;
+  - several busy ticks → only one pending message is kept (`inbox.replace` in place, no backlog).
+- **Backoff (v0.4.0)**: 10 minutes initially; 20 then 30 while nobody answers (`[base, 2×base, 3×base]`, overridable with `backoffSeconds`). The longer the silence, the rarer the noise.
+- **Hard stop (v0.4.0, token guard)**: after `pauseAfterMissed` (default 3) beats with no human reply the timer is **torn down completely** — nothing is ever delivered again; only your next message revives it, restarting from the initial 10-minute tier. Every real message resets the phase, so heartbeats only speak in genuine silence.
+- **Light wake-up (v0.4.0)**: before delivery the plugin asks the host compaction service to fold long history into a checkpoint summary (`compactBeforeBeat`, on by default; a failure never blocks delivery), and the injected instruction says "no tools, no history replay, ≤5 sentences" — each beat costs as little context as possible.
+- **Hourly cap (optional)**: `maxBeatsPerHour` (default 0 = off) caps beats in any 60-minute window, against the "sporadic replies keep resetting backoff" worst case.
+- **Task inspection (v0.5.0)**: before each beat it reads the session projections (todos / team board / goal), folds open items into a snapshot, and instructs the agent to **ask only, never start work**. See the next section.
+- Injected messages render as a collapsed context chip in the transcript, not a full user bubble.
 
-## 任务巡检（v0.5.0）
+## Task inspection (v0.5.0)
 
-心跳不再只靠「最近对话」猜状态。每拍投递前，插件同步读一次宿主的 **session projections**（`ctx.sessionProjections`），把结果压成一段紧凑快照注入心跳消息：
+A heartbeat no longer has to guess from "the last conversation". Before each beat the plugin synchronously reads the host's **session projections** (`ctx.sessionProjections`) and folds the result into a compact snapshot injected with the beat:
 
-| 投影 key | 读到的内容 | 进快照的规则 |
+| Projection | What it reads | What enters the snapshot |
 |---|---|---|
-| `todos` | 会话待办清单（`content` / `status`） | 只留 `in_progress`、`pending`；`completed` 丢弃 |
-| `agentTeam` | Agent Team 团队任务板（`subject` / `status` / `blockedBy`） | 只留未完成条目，按「可开始 → 进行中 → 被阻塞」排序，阻塞会标明依赖哪个任务 |
-| `goal` | 持久目标（`objective` / `phase`） | 只留 `active` / `paused` / `blocked` 三种相位 |
+| `todos` | session todo list (`content` / `status`) | only `in_progress` / `pending`; `completed` dropped |
+| `agentTeam` | Agent Team board (`subject` / `status` / `blockedBy`) | open items only, sorted "ready → in progress → blocked"; blockers are named |
+| `goal` | persistent goal (`objective` / `phase`) | only `active` / `paused` / `blocked` phases |
 
-读之前要知道的两件事：
+Two things to know before reading that table:
 
-- `agentTeam` 投影**只有启用 Agent Team 可选包时才注册**；未启用时读不到它 → 自动降级，不报错、快照里也不会出现团队任务段。
-- `todos` 投影**每个 turn 开始会重置**：心跳看到的是「最近一个 turn 内的待办」，不是会话级长期 TODO——别把它当持久任务清单。
+- the `agentTeam` projection is **only registered when the Agent Team optional package is enabled**; without it the read degrades automatically — no error, and no team section in the snapshot;
+- the `todos` projection **resets at the start of every turn**: a beat sees the todos of the most recent turn, not a session-wide long-term list — don't treat it as a persistent TODO store.
 
-快照后面附一条指令：发现「该做但还没人拍板」的事 → 用 `ask_user_question` 工具（不可用就直接问）问用户「现在要不要我主动做」，最多 3 条、每条一句建议；**只提问，不擅自开工**。
+After the snapshot comes one instruction: if something is "worth doing but nobody has called it", use the `ask_user_question` tool (or just ask in the reply) to ask the user "want me to do it now?" — at most 3 suggestions, one sentence each; **ask, never start work**.
 
-健壮性约定：
+Robustness:
 
-- 宿主没注册 `sessionProjections` 服务、会话还没绑定、或某个投影读取抛错 → **降级为提示语**，心跳照常投递；绝不因为任务巡检失败而丢拍。
-- 任务块（快照 + 提问指令）有 **800 字符硬上限**，`taskNudgeMaxItems` 再限每类条目数（默认 5，范围 1–20）——任务巡检是加料，不是加负担。
-- 插件对投影**只读不写**：不改你的待办、团队任务板或目标；任务要真的被改动，仍然由你或 agent 走正常工具链。
-- 自定义 `prompt` 不含 `{{tasks}}` 占位符时，任务块（快照 + 指令）自动追加到提示词末尾（v0.4.x 的自定义提示词不用改）。
+- no `sessionProjections` service, no session binding, or a throwing projection → **degrades to a hint** and the beat is still delivered; a failed task inspection never drops a beat.
+- the task block (snapshot + ask instruction) is hard-capped at **800 characters**; `taskNudgeMaxItems` caps items per bucket (default 5, range 1–20) — the inspection is a garnish, not a burden.
+- the plugin **only reads** projections: it never edits your todos, team board or goal; real changes still go through the normal tooling.
+- a custom `prompt` without the `{{tasks}}` placeholder gets the task block appended at the end (v0.4.x custom prompts keep working).
 
-配置（设置面板「心跳 Heartbeat」里可开关）：
+Settings (toggle in the **Heartbeat** section):
 
-| 键 | 默认 | 含义 |
+| Key | Default | Meaning |
 |---|---|---|
-| `taskNudge` | `true` | 是否做任务巡检；关闭后心跳消息里不再注入任务快照，也没有巡检 / 提问指令 |
-| `taskNudgeMaxItems` | `5` | 快照里每类最多列几项（1–20） |
+| `taskNudge` | `true` | whether to run task inspection; when off, no snapshot and no inspection / ask instruction |
+| `taskNudgeMaxItems` | `5` | max items per bucket in the snapshot (1–20) |
 
-关掉 `taskNudge` 不影响心跳本身：消息退化为通用的「汇报进展 / 提问 / 报个日常」提示词，比开着时更短。
+Turning `taskNudge` off doesn't disable the heartbeat: the message degrades to the generic "report progress / ask / small talk" prompt, shorter than the inspection version.
 
-## 安装
+## Install
 
 ```sh
 dsh plugin --profile <profile> add dsh-plugin-heartbeat
 ```
 
-（包内置 `dsh.bundle` manifest，`dsh plugin add` 会把它自动挂进 profile 的 bundles 层；dsh-market 里的一键安装同此通道。）
+(The package declares a `dsh.bundle` manifest, so `dsh plugin add` mounts it into the profile's bundles layer automatically; one-click install in dsh-market uses the same path.)
 
-重启 DSH 后生效。之后在 **设置 → 心跳 Heartbeat** 面板里随时改频率、开关、暂停阈值与任务巡检，保存即热应用（无需重启）。
+Restart DSH. Then use **Settings → Heartbeat** to change the interval, switch, pause threshold and task inspection at any time; saving applies hot (no restart).
 
-> ⚠️ **不要**再往 profile 的 `cordis.patch.yml` 里手写 `- insert: {id: dsh-heartbeat, ...}`：
-> 那会与 bundle manifest 的自动挂载产生两条同名 entry，整个 profile 会以
-> `duplicate loader entry id "dsh-heartbeat"` 启动失败（2026-08-18 实机事故，
-> 当时撞的是 memory 插件的同名条目）。运行期配置走 `<dshHome>/heartbeat.json`；
-> 覆盖 composition 键（如 `prompt`）用**不带 insert 的 id 覆盖条目**，见下。
+> ⚠️ **Don't** hand-write `- insert: {id: dsh-heartbeat, ...}` into the profile's `cordis.patch.yml`: it collides with the bundle manifest's automatic mount and the whole profile fails to start with
+> `duplicate loader entry id "dsh-heartbeat"` (real incident on 2026-08-18, colliding with the memory plugin's entry). Runtime config lives in `<dshHome>/heartbeat.json`; override composition keys (such as `prompt`) with an **id-only override entry, no insert** — see below.
 
-## 版本要求
+## Settings sidebar icon
 
-- **DSH：官方 0.2.1-rc.5 系列**。`package.json` 已声明 `engines.dsh: "^0.2.1-rc.5"`——宿主用 semver（`includePrerelease: true`）做引擎闸门，注意 prerelease 语义：`^0.2.1` / `>=0.2.0` **都匹配不上** `0.2.1-rc.5`，必须写 `^0.2.1-rc.5` 才认；它同时覆盖将来 0.2.1 正式版，而 0.3.0-rc.1 会被判不兼容。
-- **session format v4**（官方 0.1.7+）。心跳消息的 source 使用 producer-owned kind `plugin:heartbeat`；v4 的原生准入拒绝 v3 的 `{kind:'plugin', plugin:'heartbeat'}` wrapper，报 `format v4 message requires a producer-owned source kind`（该错误被包成 `code: "UNKNOWN"`，界面显示为 `... source kind UNKNOWN`——`UNKNOWN` 是错误码，不是 kind 值）。v4 与 v3 白名单互斥、无法两全。
-- **0.4.2 是最后一个 v3 兼容版本**；**0.5.0 起只支持官方 DSH 0.2.1-rc.5 系列**（session format v4 + 当前离线验证过的宿主 API）。更早的 0.2.x 若没有 `sessionProjections` 会自动降级，但未逐版本验证；0.3.x 暂不支持。
-- **实机验证**（DSH Desktop 0.2.1-rc.5，运行中的真实宿主）：**心跳投递 + 任务巡检快照注入**已跑通——真实会话里 `todos` 与 Agent Team 任务板都正确注入（`ready` / `blockedBy` 推导正确），source `plugin:heartbeat` 通过 session v4 准入；设置面板 `GET/POST /api/heartbeat/config` 实机读写并热应用。注：pre-beat 压缩路径只有单测覆盖，未单独做实机观察。
+The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `stroke-width: 1.3` (the shared `ICON_MEDIUM_STROKE`), pure-black alpha painted through `mask-image` so the visible color follows `currentColor` in both light and dark themes. It matches the dsh-plugin-memory icon spec exactly. The official `settings.section` slot projects only id / order / label — there is no icon field — so the plugin claims its own nav row by exact label text, mirrors it with a `MutationObserver` (re-claimed after a language switch or remount) and cleans everything up on dispose.
 
-## 配置
+## Version requirements
 
-| 键 | 默认 | 含义 |
+- **DSH: official 0.2.1-rc.5 series.** `package.json` declares `engines.dsh: "^0.2.1-rc.5"`; the host gates with semver (`includePrerelease: true`), so mind prerelease semantics: `^0.2.1` / `>=0.2.0` **do not match** `0.2.1-rc.5`; only `^0.2.1-rc.5` does. It also covers the eventual 0.2.1 stable, while `0.3.0-rc.1` is judged incompatible.
+- **session format v4** (official 0.1.7+). The heartbeat source uses the producer-owned kind `plugin:heartbeat`; v4's native admission rejects the v3 `{kind:'plugin', plugin:'heartbeat'}` wrapper with `format v4 message requires a producer-owned source kind` (wrapped as `code: "UNKNOWN"`, shown as `... source kind UNKNOWN` — `UNKNOWN` is the error code, not a kind). The v4 and v3 allowlists are mutually exclusive.
+- **0.4.2 is the last v3-compatible version**; **from 0.5.0 the plugin supports only the official DSH 0.2.1-rc.5 series** (session format v4 + the host APIs verified offline). Older 0.2.x without `sessionProjections` degrades automatically but is not verified version by version; 0.3.x is not supported yet.
+- **Verified on a real host** (DSH Desktop 0.2.1-rc.5, live): **heartbeat delivery + task snapshot injection** work — in a real session both `todos` and the Agent Team board were injected with correct `ready` / `blockedBy`, source `plugin:heartbeat` passed v4 admission, and the settings panel `GET/POST /api/heartbeat/config` was exercised live and applied hot. Note: the pre-beat compaction path is covered by unit tests only and was not separately observed on a live host.
+
+## Configuration
+
+| Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | 总开关（用户层存在 `<dshHome>/heartbeat.json`） |
-| `intervalSeconds` | `600` | 初始心跳周期（钳制在 30–86400 秒）；退避后续档自动 ×2、×3 |
-| `pauseAfterMissed` | `3` | 硬停阈值：连续 N 拍无真人回复 → 拆定时器彻底停止；用户下一条消息复活并回初始档重新计时。`0` = 关闭 |
-| `taskNudge` | `true` | 任务巡检：每拍读一次会话里的待办 / 团队任务 / 目标并把快照与提问指令注入心跳；关闭后两者都不出现（用户层可改） |
-| `taskNudgeMaxItems` | `5` | 任务快照里每类条目上限，1–20（用户层可改） |
-| `backoffSeconds` | 未设 | 显式退避档位数组（如 `[600, 900, 1800]`，仅 composition） |
-| `compactBeforeBeat` | `true` | 投递前先压缩历史为 checkpoint 摘要（仅 composition，无 compaction 服务时自动跳过） |
-| `maxBeatsPerHour` | `0` | 每 60 分钟滑动窗口的心跳上限（`0`=关闭，仅 composition） |
-| `prompt` | 内置 | 每拍投递的指令模板，`{{time}}` 替换为当前时间、`{{tasks}}` 替换为任务快照（仅 composition 配置） |
-| `configFile` | `<dshHome>/heartbeat.json` | 用户配置文件路径（`enabled` / `intervalSeconds` / `pauseAfterMissed` / `taskNudge` / `taskNudgeMaxItems`） |
+| `enabled` | `true` | master switch (user layer lives in `<dshHome>/heartbeat.json`) |
+| `intervalSeconds` | `600` | initial beat period (clamped to 30–86400 s); later backoff tiers are ×2 / ×3 |
+| `pauseAfterMissed` | `3` | hard-stop threshold: after N beats with no human reply the timer is torn down; your next message revives it and restarts from the initial tier. `0` = off |
+| `taskNudge` | `true` | task inspection: read the session's todos / team board / goal each beat and inject the snapshot + ask instruction; both disappear when off (user-layer configurable) |
+| `taskNudgeMaxItems` | `5` | per-bucket item cap in the task snapshot, 1–20 (user-layer configurable) |
+| `backoffSeconds` | unset | explicit backoff tier array (e.g. `[600, 900, 1800]`, composition only) |
+| `compactBeforeBeat` | `true` | fold history into a checkpoint summary before delivery (composition only; skipped when no compaction service) |
+| `maxBeatsPerHour` | `0` | beat cap per 60-minute sliding window (`0` = off, composition only) |
+| `prompt` | built-in | instruction template delivered on each beat; `{{time}}` → current time, `{{tasks}}` → task snapshot (composition only) |
+| `configFile` | `<dshHome>/heartbeat.json` | user config path (`enabled` / `intervalSeconds` / `pauseAfterMissed` / `taskNudge` / `taskNudgeMaxItems`) |
 
-自定义心跳提示词（composition 配置，**不带 `insert`**，避免与 bundle 层重复）：
+Custom heartbeat prompt (composition config, **no `insert`**, to avoid duplicating the bundle layer):
 
 ```yaml
 - id: dsh-heartbeat
   config:
     prompt: |
-      【心跳】当前时间 {{time}}。看一眼最近的对话和待办：
-      有进展说进展、有风险说风险；都没有就一句话带过。
-      总长不超过 5 句，中文。
+      【Heartbeat】the current time is {{time}}. Take a look at the recent
+      conversation and the todos: report progress if any, risks if any;
+      otherwise a single line. 5 sentences at most.
 ```
 
-想指定任务快照插在哪，就把 `{{tasks}}` 写进自定义提示词；不写也能用——`taskNudge` 开着时快照会自动追加到末尾。
+To place the task block exactly where you want it, put `{{tasks}}` in your custom prompt; omit it and the block is appended at the end while `taskNudge` is on.
 
-> 为什么不用 settings 面板的通用 namespace？DSH 的 settings wire 只服务一张
-> 硬编码白名单（`WEB_SETTINGS_NAMESPACES`），插件无法把自有 namespace 暴露给
-> 浏览器写入。本插件因此在 host 自建了 `GET/POST /api/heartbeat/config`
-> 路由，设置面板里的「心跳 Heartbeat」区块直连该路由，写入即热应用。
+> Why not the generic settings namespace? DSH's settings wire serves only a hard-coded allowlist (`WEB_SETTINGS_NAMESPACES`); a plugin cannot expose its own namespace to the browser for writes. This plugin therefore hosts `GET/POST /api/heartbeat/config` in the host process; the **Heartbeat** section in Settings talks to that route directly, and writes apply hot.
 
-## 开发
+## Development
 
 ```sh
 node --test
 ```
 
-无参 `node --test` 会自动发现 `test/*.test.mjs`（`test/runtime.test.mjs` + `test/tasks.test.mjs`），当前共 60 个用例。
+No-arg `node --test` discovers `test/*.test.mjs` (`runtime.test.mjs` + `tasks.test.mjs` + `settings-nav-icon.test.mjs` + `client-half.test.mjs`) — 74 tests at the moment.
 
-## 已知边界
+## Known limits
 
-- 心跳只在 DSH 进程活着时存在（app 关了就停）。
-- 每个会话（root agent）各自一条定时器，互不干扰；子 agent 不挂心跳。
-- 插件在会话已打开后才热挂载/热重载时，会对现有 root agent 做一次幂等补挂（不重复计时）；热挂载之后新开的会话仍走 `agent/created`。
-- 心跳**不打断**正在跑的任务；任务结束后它会立刻补一句。
-- 心跳是「汇报」不是「新任务」：默认提示词要求它别自作主张开新活。
-- 任务巡检同样只问不做：快照里的事项要真的动手，仍需要你在心跳提问里点头。
-- `taskNudge: false` 是整开关：心跳消息里没有任务快照、也没有巡检 / 提问指令，只留通用汇报提示词。
-- 任务快照来自宿主 session projections，是**只读**的实时视图；宿主没有该服务（较老版本的 DSH）时自动降级为纯提示词心跳，不会报错。
-- 硬停前已排队的一条心跳（agent 忙时）会在当前轮结束时被消费——此后绝无新拍。
-- 与 dsh-plugin-memory 互相独立、零依赖；两者同时安装时消息在同一个 inbox 队列里排队，不冲突。
-- 插件依赖 `agent.followup` / `agent.inbox` 等 **agent-loop 驱动面**——它们不属于 DSH 公开 API catalog，已锁定 DSH 0.2.x；宿主若换实现，最多丢一拍并打一条 warn，不会在定时器里抛崩插件。
-- **版本要求**：官方 DSH 0.2.1-rc.5 系列、session format v4；`package.json` 已声明 `engines.dsh: "^0.2.1-rc.5"`，细节见上方「版本要求」。
+- The heartbeat only exists while the DSH process is alive (it stops when the app quits).
+- Each session (root agent) has its own timer; subagents never get a heartbeat.
+- When the plugin is hot-mounted/reloaded after sessions are already open, it does one idempotent catch-up attach over existing root agents (no double timers); sessions opened afterwards still go through `agent/created`.
+- The heartbeat **does not interrupt** running work; it speaks up as soon as the current turn ends.
+- The heartbeat is a "report", not a "new task": the default prompt tells it not to start work on its own.
+- Task inspection also only asks: actually doing the items still needs your go-ahead in the beat's question.
+- `taskNudge: false` is a full switch: no task snapshot and no inspection / ask instruction in the beat — only the generic report prompt remains.
+- The task snapshot comes from host session projections and is a **read-only** live view; hosts without that service (older DSH) degrade to a prompt-only heartbeat instead of erroring.
+- One already-queued beat (while the agent was busy) is consumed when the current turn ends — there is never a new beat after that hard stop.
+- Zero coupling with dsh-plugin-memory; when both are installed, their messages queue in the same inbox and do not conflict.
+- The plugin depends on the **agent-loop driver surface** `agent.followup` / `agent.inbox` — not part of DSH's public API catalog — and is pinned to DSH 0.2.x; if the host changes the implementation, at worst one beat is dropped with a warning instead of throwing from the timer.
+- **Version requirement**: official DSH 0.2.1-rc.5 series, session format v4; `package.json` declares `engines.dsh: "^0.2.1-rc.5"` — see "Version requirements" above.
 
 ## License
 

@@ -2,6 +2,25 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.5.1] - 2026-10-30
+
+### Added
+
+- **设置侧栏爱心导航图标**：设置侧栏的 Heartbeat 一行现在带一个**描边爱心**标记——16×16 网格、`stroke-width: 1.3`（与宿主 `ICON_MEDIUM_STROKE` 一致）、纯黑描边只提供 alpha，可见颜色由 `mask-image` + `background-color: currentColor` 决定，深浅主题都跟随。规格与 dsh-plugin-memory 的图标**完全统一**。
+  - 官方 `settings.section` 槽只投影 id / order / label，**没有 icon 字段**，设置 shell 的 `navIcon(id)` 也只认一小撮白名单 id；因此插件按 **label 文本精确认领** 自己那一行（trim 后精确相等，不做子串匹配，避免误伤邻居），并用 `MutationObserver` 跟随语言切换 / 面板重挂载重新认领，disposer 卸载时清理 mark、样式与 observer。
+  - 新增 `lib/settings-nav-icon.js`（纯函数：`heartSvg()` / `heartMaskUrl()` / `isOwnNavRow()` / `navIconCss()`、`HEARTBEAT_SECTION_LABEL = 'Heartbeat'`），`lib/client.js` 内联同一套契约 + `claimNavIcon()`。
+- **双语文档**：`README.md` 改为英文主文档并新增 `README.zh.md` 中文版（顶部语言切换行 + GitHub / npm / license / node badges，与 dsh-plugin-memory 同款格式）；两份都补齐任务巡检、热挂载补齐、`engines.dsh` 与实机验证口径。
+
+### Changed
+
+- 设置区块 label 从 `'心跳 Heartbeat'` 改为 **`'Heartbeat'`**——它同时是显示文案和 nav 图标认领的匹配键，两者必须是同一个字符串，否则语言切换后标记会对不上行。
+- `package.json`：`files` 加入 `README.zh.md`（npm 包随附中文文档）。
+
+### Tests
+
+- 新增 `test/settings-nav-icon.test.mjs`（10 个纯函数用例）与 `test/client-half.test.mjs`（4 个客户端契约用例：用 `node:vm` + 假 `window` / `document` / `MutationObserver` 按浏览器方式加载 `lib/client.js`，验证区块注册形状、只认领 label 精确相等的行、mark 为 16×16 / stroke 1.3 / `stroke="#000"` 的 mask 爱心且颜色走 currentColor、teardown 摘干净 mark / 样式 / observer）。
+- nav icon 相关用例共 **14 个**；全量单测 **74/74 通过**（`node --test`）。
+
 ## [0.5.0] - 2026-10-30
 
 ### Added（任务巡检）

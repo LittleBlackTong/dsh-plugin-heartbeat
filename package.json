@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-heartbeat",
-  "description": "Heartbeat plugin for DeepSeek Harness: wakes the agent on a configurable interval so it proactively reports progress, risks, or blockers — and inspects the session's todos, team board and goal to ask whether to act — making small talk when there is nothing to report.",
-  "version": "0.5.0",
+  "description": "Heartbeat plugin for DeepSeek Harness: wakes the agent on a configurable interval so it proactively reports progress, risks, or blockers — inspects the session's todos, team board and goal to ask whether to act — and carries a heart mark in the settings sidebar. Makes small talk when there is nothing to report.",
+  "version": "0.5.1",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -20,6 +20,7 @@
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "dsh": {
