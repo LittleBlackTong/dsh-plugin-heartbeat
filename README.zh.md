@@ -79,6 +79,7 @@ L3 是一份**按类别授权的清单** —— `read`（检索 / 读文件）�
 开口前会被这些条件抑制（都在 `lib/gate.js`）：
 
 - **你刚说过话**（2 分钟内）—— 让位给人；
+- **其他主动插件持有发言权** —— 对方 claim 后的 `proactiveCooldownSeconds`（默认 180 秒）内，本拍记 `L0 · proactive-cooldown` 让位；「立即一拍」是例外；
 - **子 agent / teammate 还在跑** —— root 只是在等委派出去的工作，本拍记 `L0 · child-active`、不注入、不压缩（v0.6.1；设 `quietWhileChildrenActive: false` 可恢复旧行为）；
 - **上下文压力 > 0.9** —— 接近上下文上限时不额外开轮；
 - **静默时段**（默认 `23:00–08:00`，可配置，`null` 关闭）；
@@ -141,6 +142,33 @@ v0.5 起每拍可以携带一段任务快照；传感器复用同一批投影，
 
 面板文案走 DSH 自己的语言层：client 半注入 `locale`、注册 `heartbeat` 命名空间的中英语言包，并在 settings section 上声明 `locale: 'heartbeat'`——所以面板**跟随「设置 → 通用设置 → 语言」**，切换 App 语言即时重渲染（不靠浏览器语言猜）。侧栏 label 走同一套语言包（中文「心跳」/ 英文 `Heartbeat`），语言切换后爱心图标的认领会自动重跑，标记始终落在当前那一行。
 
+## 与其他插件的发言权仲裁（v0.7.0）
+
+同一段对话里可能有多个主动插件都想说话。v0.7 加了一套极小的共享协议，避免两个插件抢话：
+
+- 投递前先 claim `${DSH_HOME:-~/.dsh}/proactive-cooldown.json` —— `{ version: 1, speaker: "heartbeat" | "memory", at: <epoch ms> }`，tmp+rename 原子写；
+- 若记录在 `proactiveCooldownSeconds`（默认 **180**，`0` = 关闭）内且属于**其他 speaker**，本拍让位并记 `L0 · proactive-cooldown（让位给 …）`，之后某一拍再试；
+- **立即一拍（Beat now）** 绕过仲裁 —— 手动拍是你的显式请求；
+- 模块零 import 自 memory 插件：双方各自独立实现同一协议，任一方可单独安装 / 升级 / 卸载；读不到文件按「无锁」处理，写失败降级为「放行」（是礼貌，不是硬依赖）。
+
+## 生理签名（v0.7.0）
+
+心跳不是 cron：它是有身体的。L1/L2/L4 消息可以在 why-now 之后带一行很短的「状态」，例如 `〔状态：距你上次说话 2h · 今天第 3 次找你〕`：
+
+- 由 `lib/physiology.js` 渲染，硬上限 60 字；`physiologyLine`（默认 `true`）是总开关，自定义 prompt 可以用 `{{physiology}}` 占位符指定位置；
+- vitals 新记 `lastUserMessageAt` / `lastTurnEndAt` / `busyMsToday`，所以这行跨重启仍成立；
+- 用户 20 分钟内出现过 → 不显示（是观察，不是打扰）；措辞随时段变化（早上好：/ 傍晚了：/ 状态：），深夜更短更轻、不带计数。
+
+`userActiveSuppressSeconds`（默认 **120**，`0` = 不抑制）把「你刚说过话就静默」的窗口做成可配置；它用持久化的 `lastUserMessageAt`，跨重启也生效。
+
+## 子智能体执行中胶囊（v0.7.0）
+
+后台子智能体还在跑时，会话头部可能看起来已经结束。
+
+**这里规避的已知宿主行为**：DSH 会话列表的 `running` 只在 agent 创建 / 销毁时重算，子会话 `api-session/status` 按 session 资源转发——父会话空闲时，它的视图可能拿不到子会话运行状态的变化，于是头部显示「N 个子智能体」而不是「正在运行」，主会话看起来已完成。
+
+现在插件在 `GET /api/heartbeat/status` 的每个会话上报告 `children: { total, running, runningIds }`（来自 `subagentCatalog` / `agentTeam` 的 wire view 加活 agent registry——和 runtime 保持静默用的是同一份宿主真值），客户端在 `conversation.session.header.actions` 注册头部胶囊 **「子智能体执行中 · N」**，每 5 秒轮询；子任务结束自动隐藏，并跟随 App 语言。**纯插件层，零宿主改动。**
+
 ## 安装
 
 ```sh
@@ -166,7 +194,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 - **DSH：官方 0.2.1-rc.5 系列**。`package.json` 已声明 `engines.dsh: "^0.2.1-rc.5"`——宿主用 semver（`includePrerelease: true`）做引擎闸门，注意 prerelease 语义：`^0.2.1` / `>=0.2.0` **都匹配不上** `0.2.1-rc.5`，必须写 `^0.2.1-rc.5` 才认；它同时覆盖将来 0.2.1 正式版，而 0.3.0-rc.1 会被判不兼容。
 - **session format v4**（官方 0.1.7+）。心跳消息的 source 使用 producer-owned kind `plugin:heartbeat`；v4 的原生准入拒绝 v3 的 `{kind:'plugin', plugin:'heartbeat'}` wrapper。v4 与 v3 白名单互斥、无法两全。
 - **0.4.2 是最后一个 v3 兼容版本**；**0.5.0 起只支持官方 DSH 0.2.1-rc.5 系列**。0.3.x 暂不支持。
-- **请用 0.6.2 及以上**：已发布的 0.6.1 误读会话投影——`stateOf()` 返回的是原始 state，普通会话的 `subagent` 身份是 `{}`，被判成「这是子会话」→ **心跳完全挂不上**，child-active 闸门也永不生效。0.6.2 改为优先读 wire view 并校验形状；请升级。
+- **请用 0.7.0**：已发布的 0.6.1 误读会话投影——`stateOf()` 返回的是原始 state，普通会话的 `subagent` 身份是 `{}`，被判成「这是子会话」→ **心跳完全挂不上**，child-active 闸门也永不生效；0.6.2 修了这个问题，0.7.0 再加发言权仲裁、生理签名与子智能体胶囊。
 - **实机验证**（DSH Desktop 0.2.1-rc.5，重启后加载 v0.6.0 构建）：
   - `GET /api/heartbeat/status` → 200，返回 2 个 live session（含 `sessionId` / `cwd` / `nextBeatAt` / 预算 / history）；`/api/heartbeat/config` 返回 **v2** 配置；
   - 已有的 v1 `heartbeat.json` 自动迁移到 v2（`intervalSeconds` → `baseIntervalSeconds`，新增 mode / 静默时段 / 预算等字段），并自动创建 `heartbeat-vitals.json`；
@@ -174,7 +202,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
   - **热插拔**：运行中 `dsh plugin remove` 使 `/status` 从 200 变 401（路由消失、无崩溃），`add` 回来恢复 200 且会话恢复；
   - **控制路由**：未知 action 返回 400，`snooze` 让 `snoozeUntil` 生效，`reset` 清零恢复；
   - 侧栏爱心图标与 `Heartbeat` 区块正常渲染。
-  **未单独实机验证**（仅单测覆盖）：事件驱动时延（≤10 秒）、pre-beat 压缩、真实的 L2 提问投递。v0.6 自主层由 129 个单测覆盖。
+  **未单独实机验证**（仅单测覆盖）：事件驱动时延（≤10 秒）、pre-beat 压缩、真实的 L2 提问投递。v0.6 自主层由 172 个单测覆盖。
 
 ## 配置（v2）
 
@@ -196,10 +224,13 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 | `restartCooldownSeconds` | `300` | 重启后即使有信号也先安静这么久 |
 | `quietHours` | `{"start":"23:00","end":"08:00"}` | 该时段内不开口（支持跨午夜；`null` = 关闭） |
 | `quietWhileChildrenActive` | `true` | 子 agent / teammate 还在跑时保持静默（本拍记 `L0 · child-active`、不注入）；手动「立即一拍」是例外（v0.6.1） |
+| `proactiveCooldownSeconds` | `180` | 与其他主动插件的共享发言冷却（`0` = 关闭；手动「立即一拍」绕过） |
+| `userActiveSuppressSeconds` | `120` | 用户最后一条消息后这么久内不开口（`0` = 不抑制） |
+| `physiologyLine` | `true` | 心跳里带一行生理签名（自定义 prompt 可用 `{{physiology}}` 指定位置） |
 | `taskNudge` | `true` | 是否在心跳里带任务快照 + 提问指令 |
 | `taskNudgeMaxItems` | `5` | 任务快照每类条目上限（1–20） |
 | `l3Allow` | `[]` | L3 授权类别：`read` / `test` / `notes` / `continue` |
-| `prompt` | `null` | 自定义提示词模板（`{{time}}` / `{{tasks}}` / `{{reason}}`）；`null` = 内置分级提示词 |
+| `prompt` | `null` | 自定义提示词模板（`{{time}}` / `{{tasks}}` / `{{reason}}` / `{{physiology}}`）；`null` = 内置分级提示词 |
 | `workspaces` | `{}` | 按会话绝对 cwd 的工作区覆盖 |
 
 `workspaces` 条目可写：`enabled`、`mode`、`baseIntervalSeconds`、`quietHours`（对象或 `null`）、`maxBeatsPerDay`、`l3Allow`。优先级：composition 配置 < 用户配置 < 命中的工作区覆盖。
@@ -230,7 +261,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 node --test
 ```
 
-无参 `node --test` 会自动发现 `test/*.test.mjs`；测试覆盖 `runtime`、`tasks`、`sensors`、`rhythm`、`gate`、`vitals`、`config-store-v2`、`prompt-levels`、`wiring-v06`、`settings-nav-icon`、`client-half`，当前共 **129 个用例**。
+无参 `node --test` 会自动发现 `test/*.test.mjs`；测试覆盖 `runtime`、`tasks`、`sensors`、`rhythm`、`gate`、`vitals`、`config-store-v2`、`prompt-levels`、`wiring-v06`、`settings-nav-icon`、`client-half`、`proactive-lock`、`physiology`、`prompt-physiology`、`activity`，当前共 **172 个用例**。
 
 设计与实施记录在仓库里（**不进 npm 包**）：`docs/specs/2026-10-30-heartbeat-v0.6-design.md`、`docs/plans/2026-10-30-heartbeat-v0.6.md`。
 
@@ -240,6 +271,7 @@ node --test
 - 每个 root agent 各自一条 runtime；**子 agent 会话永不挂心跳**（按身份守卫，见下）。
 - **默认安静**：没有变化就不说话。存在感现在靠面板的生命体征与「立即一拍」，而不是按点叨叨——想让它更活跃就调 `mode` / 去重 / 静默时段相关配置。
 - **不打断委派工作（v0.6.1）**：子 agent / teammate 在跑时，root 只是因为等它才 idle；此时心跳若开新一轮，会在工作中间插入一条消息——客户端把「正在运行子会话」展示为当前活跃 turn 的一部分，新 turn 会把它顶掉，你就看不出后台还在跑了（pre-beat 压缩还可能把活跃 turn 折进摘要）。所以这类拍只记 `L0 · child-active`、不注入、不压缩，直到子任务全部结束；手动「立即一拍」仍可强制触发。
+- **头部胶囊才是「仍在跑」的可靠指示（v0.7.0）**：子任务运行期间，宿主会话头部可能把父会话本轮显示为已结束（见上方已知宿主行为）；插件胶囊会在同一个头部里把运行状态一直显示到所有子任务结束。
 - **永不挂到子 agent 会话（v0.6.1）**：teammate / subagent 是 `mode: "continuable"` 的子会话，用户可能从侧栏把它当顶层会话重新打开 / resume；按宿主语义这种 **resumed child 可能被算作 root**（无 owner），所以 `attach()` 会先读该会话的 `subagent` 投影身份，非空就跳过不挂（日志 `heartbeat: skip subagent session`）；运行中的 runtime 也会在每次 tick 复查身份，一旦发现自己是 subagent 会话就 `dispose()` 摘除。真机排查：当前实例 3 个运行时全是 root 用户会话，逐个扫 teammate 子会话日志心跳注入 **0 条**（那些日志里的 `plugin:heartbeat` 字样是工具输出 / 文档内容，不是注入消息）。另有一个不属于插件职责的边界：**fork 型**子 agent 会继承父会话历史，fork 前父会话里已有的心跳消息会随 seed 带过去——这是 fork 语义本身；spawn 型子 agent 不受影响。
 - L3 **不是沙箱**：只改指令；不可逆操作仍由宿主 approval 拦截。
 - 运行态（`heartbeat-vitals.json`）是进程内的，原子写 + 短防抖；两个 DSH 进程共用一个 home 时是「尽力而为」，不是强一致。

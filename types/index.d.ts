@@ -22,6 +22,11 @@ export interface HeartbeatConfig {
   configFile?: string
   /** Absolute path of the runtime-state file (default `<dshHome>/heartbeat-vitals.json`). */
   vitalsFile?: string
+  /**
+   * Absolute path of the shared cross-plugin proactive-cooldown file
+   * (default `<dshHome>/proactive-cooldown.json`, shared with dsh-plugin-memory).
+   */
+  proactiveLockFile?: string
   /** Master switch for every session. Default `true`. */
   enabled?: boolean
   /** `silent` = pulses only check (L0), never open a turn; `assist` may ask. Default `assist`. */
@@ -52,6 +57,16 @@ export interface HeartbeatConfig {
   jitterSeconds?: number
   /** Quiet window (no proactive messages). `null` disables it. Default 23:00–08:00. */
   quietHours?: QuietHours | null
+  /**
+   * Cross-plugin speech-right arbitration window, in seconds: after another
+   * proactive plugin (memory) spoke, heartbeat yields for this long. `0` disables
+   * arbitration. Default `180`.
+   */
+  proactiveCooldownSeconds?: number
+  /** Silence after a real user message, in seconds. `0` never suppresses. Default `120`. */
+  userActiveSuppressSeconds?: number
+  /** Render the one-line physiology signature into L1/L2/L4 messages. Default `true`. */
+  physiologyLine?: boolean
   /** Inspect the session's task projections on every pulse. Default `true`. */
   taskNudge?: boolean
   /** Per-bucket item cap in the injected snapshot (1–20). Default `5`. */

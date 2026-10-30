@@ -4,7 +4,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, CONFIG_ROUTE_PATH, STATUS_ROUTE_PATH, CONTROL_ROUTE_PATH } from '../lib/index.js'
@@ -125,7 +125,12 @@ function makeCtx({ agents, services = {} } = {}) {
 
 const tmpFiles = () => {
   const dir = mkdtempSync(join(tmpdir(), 'hb-wiring-'))
-  return { configFile: join(dir, 'heartbeat.json'), vitalsFile: join(dir, 'heartbeat-vitals.json') }
+  return {
+    configFile: join(dir, 'heartbeat.json'),
+    vitalsFile: join(dir, 'heartbeat-vitals.json'),
+    // v0.7: keep the cross-plugin speech-right lock out of the real `~/.dsh`.
+    proactiveLockFile: join(dir, 'proactive-cooldown.json'),
+  }
 }
 
 async function callRoute(handler, { method = 'GET', body } = {}) {
@@ -226,6 +231,9 @@ test('config route serves v2 and accepts patches', async () => {
   assert.equal(initial.status, 200)
   assert.equal(initial.body.version, 2)
   assert.equal(initial.body.mode, 'assist')
+  assert.equal(initial.body.proactiveCooldownSeconds, 180)
+  assert.equal(initial.body.userActiveSuppressSeconds, 120)
+  assert.equal(initial.body.physiologyLine, true)
   const updated = await callRoute(handler, { method: 'POST', body: { mode: 'silent', maxBeatsPerDay: 3 } })
   assert.equal(updated.status, 200)
   assert.equal(updated.body.mode, 'silent')
@@ -289,14 +297,44 @@ test('projection changes wake a runtime through noteSignal', async (t) => {
       return () => {}
     },
   }
+  const files = tmpFiles()
   const web = makeWebServer()
   const { ctx } = makeCtx({ agents, services: { webServer: web, sessionProjections } })
-  const dispose = apply(ctx, { ...tmpFiles(), jitterSeconds: 0, taskNudge: false, baseIntervalSeconds: 3600 })
+  const dispose = apply(ctx, { ...files, jitterSeconds: 0, taskNudge: false, baseIntervalSeconds: 3600 })
   assert.equal(listeners.length, 1)
   listeners[0](agent.session, 'agentTeam')
   t.mock.timers.tick(2_000)
   assert.equal(agent.followed.length, 1, 'projection change produced a pulse')
+  // v0.7: the pulse claimed the shared proactive floor in the configured file,
+  // never the real `~/.dsh/proactive-cooldown.json`.
+  const claim = JSON.parse(readFileSync(files.proactiveLockFile, 'utf8'))
+  assert.equal(claim.speaker, 'heartbeat')
+  assert.equal(claim.version, 1)
   await dispose()
+})
+
+test('v0.7: host user messages and status transitions feed the persisted signature', async () => {
+  const files = tmpFiles()
+  const agents = registry()
+  const agent = new FakeAgent('sig')
+  agents.add(agent)
+  const { ctx } = makeCtx({ agents, services: { webServer: makeWebServer() } })
+  const dispose = apply(ctx, { ...files, jitterSeconds: 0 })
+  const fire = (event, payload) => {
+    for (const { event: name, callback } of [...agent._listeners.values()]) {
+      if (name === event) callback(payload)
+    }
+  }
+  // A real user message is the physiology anchor.
+  fire('agent/inbox/inserted', { message: { id: 'u1', source: { kind: 'user' } } })
+  // running → idle is a turn end; the busy window is folded into `busyMsToday`.
+  fire('agent/status', { status: 'running' })
+  fire('agent/status', { status: 'idle' })
+  await dispose()
+  const session = JSON.parse(readFileSync(files.vitalsFile, 'utf8')).sessions['session-sig']
+  assert.ok(session.lastUserMessageAt > 0, 'user message timestamp persisted')
+  assert.ok(session.lastTurnEndAt > 0, 'turn end timestamp persisted')
+  assert.ok(session.busyMsToday >= 0, 'busy time field exists for the day rollover')
 })
 
 test('applies without optional services and disposes cleanly', async () => {

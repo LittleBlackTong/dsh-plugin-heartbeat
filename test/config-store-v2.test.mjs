@@ -124,3 +124,37 @@ test('corrupt config file falls back silently', () => {
   const store = new HeartbeatConfigStore({ path: file, base: { baseIntervalSeconds: 420 } })
   assert.equal(store.get().baseIntervalSeconds, 420)
 })
+
+// ── v0.7 keys: speech-right arbitration + physiology/social rhythm ─────────
+
+test('v0.7 keys have defaults, persist and validate', () => {
+  const resolved = SettingsSchema({})
+  assert.equal(resolved.proactiveCooldownSeconds, 180)
+  assert.equal(resolved.userActiveSuppressSeconds, 120)
+  assert.equal(resolved.physiologyLine, true)
+
+  const file = tmpConfig()
+  const store = new HeartbeatConfigStore({ path: file })
+  store.update({ proactiveCooldownSeconds: 0, userActiveSuppressSeconds: 45, physiologyLine: false })
+  assert.equal(store.get().proactiveCooldownSeconds, 0)
+  assert.equal(store.get().userActiveSuppressSeconds, 45)
+  assert.equal(store.get().physiologyLine, false)
+  const persisted = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(persisted.proactiveCooldownSeconds, 0)
+  assert.equal(persisted.userActiveSuppressSeconds, 45)
+  assert.equal(persisted.physiologyLine, false)
+  assert.throws(() => store.update({ proactiveCooldownSeconds: -1 }))
+  assert.throws(() => store.update({ userActiveSuppressSeconds: 86401 }))
+  assert.throws(() => store.update({ physiologyLine: 'yes' }))
+})
+
+test('migration carries and defaults the v0.7 keys', () => {
+  const kept = migrateConfigV1toV2({ proactiveCooldownSeconds: 60, userActiveSuppressSeconds: 0, physiologyLine: false })
+  assert.equal(kept.proactiveCooldownSeconds, 60)
+  assert.equal(kept.userActiveSuppressSeconds, 0)
+  assert.equal(kept.physiologyLine, false)
+  const old = migrateConfigV1toV2({ intervalSeconds: 300 })
+  assert.equal(old.proactiveCooldownSeconds, 180)
+  assert.equal(old.userActiveSuppressSeconds, 120)
+  assert.equal(old.physiologyLine, true)
+})

@@ -2,6 +2,25 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.7.0] - 2026-10-30
+
+### Added（A 仲裁 + B 生理签名 + C 子智能体胶囊）
+
+- **A 发言权仲裁（与 memory 插件共享协议）**：新增 `lib/proactive-lock.js`。投递前先 claim 共享文件 `${DSH_HOME:-~/.dsh}/proactive-cooldown.json`（`{ version: 1, speaker: 'heartbeat' | 'memory', at: <epoch ms> }`，tmp+rename 原子写）：若窗口内已有**其他 speaker** 的 claim，本拍让位并记 `L0 · proactive-cooldown（让位给 …）`，下一拍再试；`proactiveCooldownSeconds`（默认 **180**，`0` = 关闭；manual **Beat now** 绕过）。模块零 import 自 memory，双方各自独立实现同一协议——任一方可单独装/升级/卸载；读失败按「无锁」、写失败降级为「放行」（礼貌而非硬依赖）。
+- **B 生理签名 / 社交节律**：新增 `lib/physiology.js`。L1/L2/L4 消息在 why-now 后可带一行 ≤60 字的状态（例：`〔状态：距你上次说话 2h · 今天第 3 次找你〕`）；`physiologyLine`（默认 `true`）总开关、自定义 prompt 可用 `{{physiology}}` 占位符。vitals 新增 `lastUserMessageAt` / `lastTurnEndAt` / `busyMsToday`（跨重启保留）。用户 20 分钟内出现过 → 不显示（是观察不是打扰）；措辞随时段变化（早上好：/ 傍晚了：/ 状态：），深夜更短更轻、不带计数。
+- **`userActiveSuppressSeconds`（默认 `120`，`0` = 不抑制）**：「你刚说过话就静默」的窗口可配置，并使用持久化的 `lastUserMessageAt`，跨重启仍生效。
+- **C 子智能体执行中胶囊**：`GET /api/heartbeat/status` 每个会话新增 `children: { total, running, runningIds }`（来自 `subagentCatalog` / `agentTeam` 的 wire view + 活 agent registry，与 runtime 保持静默用的是同一份宿主真值）；客户端在 `conversation.session.header.actions` 注册头部胶囊 **「子智能体执行中 · N」**，5s 轮询，子任务结束自动隐藏，中英 i18n。**纯插件层、零宿主改动**。
+
+### Changed
+
+- **已知宿主行为（胶囊为何存在）**：DSH 会话列表的 `running` 只在 agent 创建/销毁时重算，子会话 `api-session/status` 按 session 资源转发；父会话空闲时其视图可能拿不到子会话的运行变化，于是头部显示「N 个子智能体」而不是「正在运行」，主会话看起来已完成。本版的 status `children` + 头部胶囊在不改宿主的前提下把「仍在跑」补回来（见 README「Child activity pill」）。
+- 配置表新增 `proactiveCooldownSeconds` / `userActiveSuppressSeconds` / `physiologyLine`；自定义 prompt 新增 `{{physiology}}`；README 两语言补 A/B/C 三节。
+
+### Tests
+
+- 新增 `test/proactive-lock.test.mjs`、`test/physiology.test.mjs`、`test/prompt-physiology.test.mjs`、`test/activity.test.mjs`；`runtime` / `gate` / `vitals` / `client-half` / `config-store-v2` 等补相应用例。
+- 全量单测 **172/172 通过**（`node --test`）。
+
 ## [0.6.2] - 2026-10-30
 
 ### Fixed

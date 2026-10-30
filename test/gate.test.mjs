@@ -93,3 +93,44 @@ test('manual beat bypasses politeness gates if the user asks for it', () => {
   const empty = decide({ config: baseConfig, vitals: fakeVitals(), sessionId: 's', signals: [], now: NOW, manual: true })
   assert.equal(empty.level, 'L1')
 })
+
+test('user-activity suppression window is configurable (v0.7)', () => {
+  const lastUserActivityAt = NOW - 60_000
+  const defaults = decide({ config: baseConfig, vitals: fakeVitals(), sessionId: 's', signals: [ready], lastUserActivityAt, now: NOW })
+  assert.equal(defaults.suppressedBy, 'user-active', 'default 120s keeps the old behaviour')
+  const shorter = decide({
+    config: { ...baseConfig, userActiveSuppressSeconds: 30 },
+    vitals: fakeVitals(),
+    sessionId: 's',
+    signals: [ready],
+    lastUserActivityAt,
+    now: NOW,
+  })
+  assert.equal(shorter.level, 'L2', '60s of silence is already polite with a 30s window')
+  const longer = decide({
+    config: { ...baseConfig, userActiveSuppressSeconds: 300 },
+    vitals: fakeVitals(),
+    sessionId: 's',
+    signals: [ready],
+    lastUserActivityAt,
+    now: NOW,
+  })
+  assert.equal(longer.suppressedBy, 'user-active')
+  const off = decide({
+    config: { ...baseConfig, userActiveSuppressSeconds: 0 },
+    vitals: fakeVitals(),
+    sessionId: 's',
+    signals: [ready],
+    lastUserActivityAt,
+    now: NOW,
+  })
+  assert.equal(off.level, 'L2', '0 disables the suppression entirely')
+})
+
+test('persisted lastUserMessageAt keeps the suppress window across a restart', () => {
+  const vitals = fakeVitals({ session: { lastUserMessageAt: NOW - 30_000 } })
+  const suppressed = decide({ config: baseConfig, vitals, sessionId: 's', signals: [ready], now: NOW })
+  assert.equal(suppressed.suppressedBy, 'user-active')
+  const off = decide({ config: { ...baseConfig, userActiveSuppressSeconds: 0 }, vitals, sessionId: 's', signals: [ready], now: NOW })
+  assert.equal(off.level, 'L2')
+})

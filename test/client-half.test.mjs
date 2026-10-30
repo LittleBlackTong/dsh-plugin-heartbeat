@@ -137,10 +137,11 @@ function applyClient(moduleExports, { language = 'zh' } = {}) {
 test('client half registers the settings section as Heartbeat', () => {
   const { moduleExports, injections, rows } = browserHarness()
   const { slots, effects } = applyClient(moduleExports)
-  assert.deepEqual(slots.injections, ['settings.section'])
-  assert.equal(slots.registrations.length, 1)
-  const { entry, component } = slots.registrations[0]
-  assert.equal(entry.name, 'settings.section')
+  assert.ok(slots.injections.includes('settings.section'))
+  assert.ok(slots.injections.includes('conversation.session.header.actions'))
+  const section = slots.registrations.find((item) => item.entry.name === 'settings.section')
+  assert.equal(slots.registrations.length, 2)
+  const { entry, component } = section
   assert.equal(entry.id, 'heartbeat')
   assert.equal(entry.order, 100)
   assert.equal(entry.label(), '心跳', 'Chinese app language yields the Chinese label')
@@ -154,7 +155,7 @@ test('client half registers the settings section as Heartbeat', () => {
 test('sidebar label and icon follow a language switch', () => {
   const { moduleExports, rows, observers } = browserHarness()
   const first = applyClient(moduleExports, { language: 'zh' })
-  const entry = first.slots.registrations[0].entry
+  const entry = first.slots.registrations.find((item) => item.entry.name === 'settings.section').entry
   assert.equal(entry.label(), '心跳')
   // Browser language switch: label text changes, MutationObserver re-claims.
   first.localeState.active = 'en'
@@ -171,7 +172,8 @@ test('panel language follows the DSH locale layer, not navigator', () => {
   const { moduleExports } = browserHarness()
   const { slots, dictionaries } = applyClient(moduleExports, { language: 'en' })
   assert.equal(moduleExports.inject.join(','), 'slots,locale')
-  assert.equal(slots.registrations[0].entry.locale, 'heartbeat', 'slot declares the locale namespace')
+  const section = slots.registrations.find((item) => item.entry.name === 'settings.section')
+  assert.equal(section.entry.locale, 'heartbeat', 'slot declares the locale namespace')
   assert.equal(dictionaries.length, 1)
   assert.equal(dictionaries[0].namespace, 'heartbeat')
   assert.deepEqual(Object.keys(dictionaries[0].dicts).sort(), ['en', 'zh'])
@@ -180,7 +182,7 @@ test('panel language follows the DSH locale layer, not navigator', () => {
   assert.deepEqual(enKeys, zhKeys, 'both languages expose the same keys')
   assert.equal(dictionaries[0].dicts.zh.beatNow, '立即一拍')
   assert.equal(dictionaries[0].dicts.en.beatNow, 'Beat now')
-  assert.equal(slots.registrations[0].entry.label(), 'Heartbeat', 'English app language yields the English label')
+  assert.equal(section.entry.label(), 'Heartbeat', 'English app language yields the English label')
   assert.equal(dictionaries[0].dicts.zh.sectionLabel, '心跳')
   assert.equal(dictionaries[0].dicts.en.sectionLabel, 'Heartbeat')
 })
@@ -197,7 +199,7 @@ test('the nav heart is claimed only on the exact-label row', () => {
 test('the injected mark is the shared-spec black outline heart', () => {
   const { moduleExports, styles } = browserHarness()
   applyClient(moduleExports)
-  assert.equal(styles.length, 1)
+  assert.ok(styles.some((style) => String(style.textContent).includes('mask-image')), 'nav icon stylesheet present')
   const css = styles[0].textContent
   assert.match(css, /mask-image/)
   assert.match(css, /background-color:\s*currentColor/)
@@ -241,6 +243,41 @@ test('the client source calls translate instead of indexing a function', () => {
   assert.equal(/\bt\[/.test(source), false, 'translate lookups must be t(...) calls, never t[...]')
   assert.ok(source.includes('t(`l3${category}`)'), 'L3 category labels are translated via a call')
   assert.ok(source.includes('t(`level${row.level}`)'), 'history level labels are translated via a call')
+})
+
+test('activity pill renders nothing when the host reports no running child', () => {
+  const { moduleExports } = browserHarness()
+  const Pill = moduleExports.__test.ActivityPill
+  assert.equal(typeof Pill, 'function')
+  const tree = Pill({ sessionId: 'session-1', t: moduleExports.__test.fallbackT })
+  assert.equal(tree, null)
+})
+
+test('childrenOfStatus reads host child counts defensively', () => {
+  const { moduleExports } = browserHarness()
+  const childrenOfStatus = moduleExports.__test.childrenOfStatus
+  const payload = { sessions: [{ sessionId: 'main', children: { total: 3, running: 2 } }] }
+  // sandbox objects live in another realm: compare fields, not prototypes
+  const counts = (json, id) => {
+    const value = childrenOfStatus(json, id)
+    return `${value.total}/${value.running}`
+  }
+  assert.equal(counts(payload, 'main'), '3/2')
+  assert.equal(counts(payload, 'other'), '0/0')
+  assert.equal(counts(undefined, 'main'), '0/0')
+  assert.equal(counts({ sessions: 'nope' }, 'main'), '0/0')
+  // running never exceeds total after coercion
+  assert.equal(counts({ sessions: [{ sessionId: 'main', children: { total: 1, running: 9 } }] }, 'main'), '1/1')
+})
+
+test('the header pill polls the status route and is translated', () => {
+  const { moduleExports } = browserHarness()
+  const dicts = moduleExports.__test.DICTS
+  assert.equal(typeof dicts.zh.activityRunning, 'string')
+  assert.equal(typeof dicts.en.activityRunning, 'string')
+  assert.ok(CLIENT_SOURCE.includes("conversation.session.header.actions"))
+  assert.ok(CLIENT_SOURCE.includes('ACTIVITY_POLL_MS'))
+  assert.ok(CLIENT_SOURCE.includes('childrenOfStatus'))
 })
 
 test('teardown removes the mark, the stylesheet and the observer', () => {

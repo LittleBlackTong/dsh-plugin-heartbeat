@@ -106,3 +106,70 @@ test('corrupt vitals file degrades to empty state', () => {
   const reloaded = new VitalsStore({ path, debounceMs: 0 })
   assert.deepEqual(reloaded.get('s'), emptySessionState())
 })
+
+// ── v0.7 physiology signature ──────────────────────────────────────────────
+
+test('old vitals files load with the physiology fields defaulted to zero', () => {
+  const path = tmpVitals()
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    global: { lastPulseAt: 0, budget: { day: '', beats: 0 } },
+    sessions: {
+      old: {
+        lastPulseAt: 123,
+        lastDeliveredAt: 0,
+        missedCount: 0,
+        paused: false,
+        pausedReason: null,
+        snoozeUntil: 0,
+        seen: {},
+        asked: {},
+        history: [],
+      },
+    },
+  }))
+  const store = new VitalsStore({ path, debounceMs: 0 })
+  const session = store.get('old')
+  assert.equal(session.lastPulseAt, 123, 'existing fields survive')
+  assert.equal(session.lastUserMessageAt, 0)
+  assert.equal(session.lastTurnEndAt, 0)
+  assert.equal(session.busyMsToday, 0)
+  assert.equal(session.busyDay, '')
+})
+
+test('user messages, turn ends and busy time are recorded and persisted', () => {
+  const path = tmpVitals()
+  const start = new Date('2026-10-30T10:00:00').getTime()
+  let now = start
+  const store = new VitalsStore({ path, debounceMs: 0, now: () => now })
+  store.setLastUserMessageAt('s')
+  assert.equal(store.get('s').lastUserMessageAt, start)
+  now = start + 5 * 60_000
+  store.noteBusy('s', 5 * 60_000)
+  store.noteTurnEnd('s')
+  const session = store.get('s')
+  assert.equal(session.busyMsToday, 300_000)
+  assert.equal(session.busyDay, '2026-10-30')
+  assert.equal(session.lastTurnEndAt, now)
+  store.flush()
+  const reloaded = new VitalsStore({ path, debounceMs: 0, now: () => now })
+  assert.equal(reloaded.get('s').lastUserMessageAt, start)
+  assert.equal(reloaded.get('s').lastTurnEndAt, now)
+  assert.equal(reloaded.get('s').busyMsToday, 300_000)
+  assert.equal(reloaded.get('s').busyDay, '2026-10-30')
+})
+
+test('busy time rolls over at midnight and deliveredToday derives from the budget', () => {
+  const path = tmpVitals()
+  let now = new Date('2026-10-30T23:00:00').getTime()
+  const store = new VitalsStore({ path, debounceMs: 0, now: () => now })
+  store.noteBusy('s', 60_000)
+  now = new Date('2026-10-31T00:01:00').getTime()
+  store.noteBusy('s', 30_000)
+  assert.equal(store.get('s').busyMsToday, 30_000, 'a new day restarts the counter')
+  assert.equal(store.get('s').busyDay, '2026-10-31')
+  store.bumpBudget(now)
+  store.bumpBudget(now)
+  assert.equal(store.deliveredToday(now), 2)
+  assert.equal(store.deliveredToday(new Date('2026-11-01T00:00:00').getTime()), 0, 'stale budget day reads as zero')
+})

@@ -4,8 +4,16 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { HeartbeatRuntime, clampIntervalSeconds, buildHeartbeatMessage as buildMessage } from '../lib/runtime.js'
 import { decide } from '../lib/gate.js'
+
+/** Isolated shared-lock file so tests never touch the real `~/.dsh`. */
+const tmpLock = () => join(mkdtempSync(join(tmpdir(), 'hb-runtime-lock-')), 'proactive-cooldown.json')
+
+const occupyLock = (path, speaker, at) => writeFileSync(path, JSON.stringify({ version: 1, speaker, at }))
 
 // ── fakes ──────────────────────────────────────────────────────────────────
 
@@ -81,7 +89,7 @@ class FakeVitals {
   }
   ensure(id) {
     if (!this.sessions.has(id)) {
-      this.sessions.set(id, { lastPulseAt: 0, lastDeliveredAt: 0, missedCount: 0, paused: false, pausedReason: null, snoozeUntil: 0, seen: {}, asked: {}, history: [] })
+      this.sessions.set(id, { lastPulseAt: 0, lastDeliveredAt: 0, missedCount: 0, paused: false, pausedReason: null, snoozeUntil: 0, seen: {}, asked: {}, history: [], lastUserMessageAt: 0, lastTurnEndAt: 0, busyMsToday: 0, busyDay: '' })
     }
     return this.sessions.get(id)
   }
@@ -118,6 +126,18 @@ class FakeVitals {
   restartCooldownActive() {
     return this.restartCoolingDown
   }
+  setLastUserMessageAt(id, at) {
+    this.ensure(id).lastUserMessageAt = at
+  }
+  noteTurnEnd(id, at) {
+    this.ensure(id).lastTurnEndAt = at
+  }
+  noteBusy(id, deltaMs) {
+    this.ensure(id).busyMsToday += deltaMs
+  }
+  deliveredToday() {
+    return this.global.budget.beats
+  }
 }
 
 const baseConfig = (overrides = {}) => ({
@@ -145,6 +165,7 @@ const makeRuntime = (agent, {
   gated = { level: 'L1', reason: 'test signal', keys: [] },
   vitals = new FakeVitals(),
   now = () => 1_000_000,
+  proactiveLockPath = tmpLock(),
   extra = {},
 } = {}) => ({
   vitals,
@@ -152,6 +173,7 @@ const makeRuntime = (agent, {
     readConfig: () => config,
     getVitals: () => vitals,
     now,
+    proactiveLockPath,
     collectSignals: () => ({ signals, arousal: signals.reduce((sum, item) => sum + (item.weight ?? 0), 0), seen: { todos: 'sig' }, pressure: undefined }),
     decide: () => gated,
     logger: { info: () => {}, warn: () => {} },
@@ -217,6 +239,7 @@ test('dedupe: the same signal window is suppressed on the next tick', () => {
     readConfig: () => config,
     getVitals: () => vitals,
     now: () => 1_000_000,
+    proactiveLockPath: tmpLock(),
     collectSignals: () => ({ signals: [signal()], arousal: 5, seen: {} }),
     // real gate imported lazily below
     logger: { info: () => {}, warn: () => {} },
@@ -244,6 +267,7 @@ test('a suppressed pulse does not consume the change set', () => {
     readConfig: () => baseConfig(),
     getVitals: () => vitals,
     now: () => 1_000_000,
+    proactiveLockPath: tmpLock(),
     collectSignals: () => ({ signals: [signal()], arousal: 5, seen: { todos: 'v1' } }),
     logger: { info: () => {}, warn: () => {} },
   })
@@ -536,4 +560,103 @@ test('liveness check disposes a runtime whose agent is gone', () => {
   registry.live.delete(agent.id)
   runtime.tick()
   assert.equal(runtime.disposed, true)
+})
+
+// ── v0.7: speech-right arbitration + physiology signature ─────────────────
+
+const SIGNATURE_NOW = new Date('2026-10-30T14:00:00').getTime()
+
+test('a recent memory claim yields the beat: L0 proactive-cooldown, re-armed', () => {
+  const lock = tmpLock()
+  occupyLock(lock, 'memory', 1_000_000 - 60_000)
+  const agent = new FakeAgent()
+  const { runtime, vitals } = makeRuntime(agent, {
+    config: baseConfig({ proactiveCooldownSeconds: 180 }),
+    signals: [signal()],
+    gated: { level: 'L2', reason: 'r', keys: ['k'] },
+    proactiveLockPath: lock,
+  })
+  runtime.tick()
+  assert.equal(agent.followed.length, 0, 'the beat does not inject while memory owns the floor')
+  assert.equal(vitals.lastPulse.level, 'L0')
+  assert.match(vitals.lastPulse.reason, /proactive-cooldown/)
+  assert.match(vitals.lastPulse.reason, /memory/, 'the reason names the current speaker')
+  assert.ok(runtime.timer !== undefined, 'the runtime re-arms after yielding')
+  runtime.dispose()
+})
+
+test('manual Beat now bypasses the proactive lock', () => {
+  const lock = tmpLock()
+  occupyLock(lock, 'memory', 1_000_000)
+  const agent = new FakeAgent()
+  const { runtime } = makeRuntime(agent, {
+    config: baseConfig({ proactiveCooldownSeconds: 180 }),
+    signals: [],
+    gated: { level: 'L1', reason: 'manual', keys: [] },
+    proactiveLockPath: lock,
+  })
+  assert.equal(runtime.forceBeat(), true)
+  assert.equal(agent.followed.length, 1)
+  runtime.dispose()
+})
+
+test('proactiveCooldownSeconds: 0 disables arbitration', () => {
+  const lock = tmpLock()
+  occupyLock(lock, 'memory', 1_000_000)
+  const agent = new FakeAgent()
+  const { runtime } = makeRuntime(agent, {
+    config: baseConfig({ proactiveCooldownSeconds: 0 }),
+    signals: [signal()],
+    gated: { level: 'L1', reason: 'r', keys: [] },
+    proactiveLockPath: lock,
+  })
+  runtime.tick()
+  assert.equal(agent.followed.length, 1)
+  runtime.dispose()
+})
+
+test('delivered messages carry the physiology line unless the config turns it off', () => {
+  const agent = new FakeAgent()
+  const { runtime, vitals } = makeRuntime(agent, {
+    config: baseConfig({ physiologyLine: true }),
+    signals: [signal()],
+    gated: { level: 'L1', reason: 'r', keys: [] },
+    now: () => SIGNATURE_NOW,
+  })
+  vitals.get(agent.session.id).lastUserMessageAt = SIGNATURE_NOW - 2 * 3_600_000
+  runtime.tick()
+  const text = agent.followed[0].content[0].text
+  assert.match(text, /〔状态：距你上次说话 2h · 今天第 1 次找你〕/)
+  runtime.dispose()
+
+  const quietAgent = new FakeAgent()
+  const quiet = makeRuntime(quietAgent, {
+    config: baseConfig({ physiologyLine: false }),
+    signals: [signal()],
+    gated: { level: 'L1', reason: 'r', keys: [] },
+    now: () => SIGNATURE_NOW,
+  })
+  quiet.vitals.get(quietAgent.session.id).lastUserMessageAt = SIGNATURE_NOW - 2 * 3_600_000
+  quiet.runtime.tick()
+  assert.equal(quietAgent.followed.length, 1)
+  assert.doesNotMatch(quietAgent.followed[0].content[0].text, /距你上次说话/)
+  quiet.runtime.dispose()
+})
+
+test('user messages, busy time and turn ends update the persisted signature', () => {
+  const agent = new FakeAgent()
+  const { runtime, vitals } = makeRuntime(agent)
+  runtime.start()
+  agent.emitInserted({ id: 'u1', source: { kind: 'user' } })
+  assert.equal(vitals.get(agent.session.id).lastUserMessageAt, 1_000_000)
+  agent.status = 'running'
+  runtime.sampleStatus(1_060_000)
+  runtime.sampleStatus(1_120_000)
+  assert.equal(vitals.get(agent.session.id).busyMsToday, 60_000)
+  agent.status = 'idle'
+  runtime.sampleStatus(1_180_000)
+  const session = vitals.get(agent.session.id)
+  assert.equal(session.busyMsToday, 120_000)
+  assert.equal(session.lastTurnEndAt, 1_180_000)
+  runtime.dispose()
 })
