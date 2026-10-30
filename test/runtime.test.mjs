@@ -256,6 +256,55 @@ test('a suppressed pulse does not consume the change set', () => {
   assert.equal(seenWrites, 1)
 })
 
+test('no pulse while a child subagent is still working', () => {
+  const agent = new FakeAgent()
+  const { runtime, vitals } = makeRuntime(agent, {
+    signals: [signal()],
+    gated: { level: 'L2', reason: 'r', keys: ['k'] },
+    extra: { isChildActive: () => true },
+  })
+  runtime.tick()
+  assert.equal(agent.followed.length, 0, 'a busy child suppresses the pulse')
+  assert.equal(vitals.lastPulse.level, 'L0')
+  assert.equal(vitals.lastPulse.reason, 'child-active')
+})
+
+test('manual Beat now still works while a child is working', () => {
+  const agent = new FakeAgent()
+  const { runtime } = makeRuntime(agent, {
+    signals: [],
+    gated: { level: 'L1', reason: 'manual', keys: [] },
+    extra: { isChildActive: () => true },
+  })
+  assert.equal(runtime.forceBeat(), true)
+  assert.equal(agent.followed.length, 1)
+})
+
+test('child gate can be disabled by config', () => {
+  const agent = new FakeAgent()
+  const { runtime } = makeRuntime(agent, {
+    config: baseConfig({ quietWhileChildrenActive: false }),
+    signals: [signal()],
+    gated: { level: 'L1', reason: 'r', keys: [] },
+    extra: { isChildActive: () => true },
+  })
+  runtime.tick()
+  assert.equal(agent.followed.length, 1)
+})
+
+test('a subagent conversation never receives heartbeat context', () => {
+  const agent = new FakeAgent()
+  const { runtime, vitals } = makeRuntime(agent, {
+    signals: [signal()],
+    gated: { level: 'L2', reason: 'r', keys: ['k'] },
+    extra: { isSubagentSession: () => true },
+  })
+  runtime.tick()
+  assert.equal(agent.followed.length, 0)
+  assert.equal(runtime.disposed, true, 'the runtime detaches from a subagent session')
+  assert.equal(vitals.lastPulse, undefined)
+})
+
 // ── inbox semantics ────────────────────────────────────────────────────────
 
 test('busy ticks coalesce into a single pending message', () => {

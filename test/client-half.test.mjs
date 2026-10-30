@@ -233,6 +233,16 @@ test('panel helpers: durations, states, languages and strings', () => {
   }
 })
 
+test('the client source calls translate instead of indexing a function', () => {
+  const source = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // Regression: a mechanical i18n rewrite once left `t[`key`]`, which is
+  // `undefined` on a function and silently rendered blank labels (L3 grants
+  // lost their category names). Translate lookups must be calls.
+  assert.equal(/\bt\[/.test(source), false, 'translate lookups must be t(...) calls, never t[...]')
+  assert.ok(source.includes('t(`l3${category}`)'), 'L3 category labels are translated via a call')
+  assert.ok(source.includes('t(`level${row.level}`)'), 'history level labels are translated via a call')
+})
+
 test('teardown removes the mark, the stylesheet and the observer', () => {
   const { moduleExports, rows, styles, observers } = browserHarness()
   const { effects } = applyClient(moduleExports)

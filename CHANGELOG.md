@@ -2,6 +2,32 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.6.1] - 2026-10-30
+
+### Fixed
+
+- **子任务进行中不再插话（真机 bug）**：现象——子 agent / teammate 还在跑的时候，心跳触发注入了一轮新 turn，主会话里「子 agent 正在运行」的状态被这轮新话顶掉，用户因此看不出后台工作还在跑。
+  - **原因**：root agent 在等委派出去的子任务时是 idle，心跳把「idle」当成可打扰；而客户端把「正在运行的子会话」作为当前活跃 turn / 会话状态的一部分渲染，新注入的 turn 会抢占这个位置。另外 v0.6.0 修复 `AbortSignal` 后 pre-beat 压缩才真正生效，也可能把活跃 turn 的表面节点折进摘要（本机日志未观察到 compaction 事件，属防御性一并规避）。
+  - **修法**：pulse 前检查本会话的 `subagentCatalog` + `agentTeam` 成员，任一子会话的 agent `status !== 'idle'` → 本拍记 **`L0 · child-active`**、**不注入、不压缩**，直到子任务全部结束。手动 **Beat now** 仍可强制触发（用户显式操作例外）。
+- **心跳不再挂到子 agent 会话（resumed child 可能被算作 root 的风险）**：teammate / subagent 是 `mode: "continuable"` 的子会话，用户可能从侧栏把它当顶层会话重新打开 / 恢复（resume）；按宿主语义，这种 resumed child **可能被算作 root（无 owner）**，旧 attach 逻辑会因此给它挂上心跳 → 向子 agent 会话注入多余上下文。
+  - **修法**：`attach()` 先读该会话的 `subagent` 投影身份，身份非空 → **跳过不挂**（日志 `heartbeat: skip subagent session`）；`tick()` 里再防御性检查，一旦发现自己是 subagent 会话就 `dispose()` 摘除。
+  - **真机排查证据**：当前实例 3 个运行时全是 root 用户会话；逐个扫 teammate 子会话日志，**heartbeat 注入 0 条**（日志里出现的 `plugin:heartbeat` 字样是工具输出 / 文档内容，不是注入消息）。
+  - **已知边界（fork 语义）**：fork 型子 agent 会继承父会话历史，若 fork 前父会话已有心跳消息，会随 seed 带过去——这是 fork 语义本身，插件无法阻止；spawn 型子 agent 不受影响。
+- **设置面板 L3 授权类别标签空白（真机 UI bug）**：现象——「L3 自动执行授权」那 4 个勾选框**旁边没有文字**，看不出在授权什么；历史脉冲行的 level 也显示成原始 `L0` / `L1`。
+  - **原因**：早前把客户端文案批量换成 `t('key')` 时漏了一处 `t[\`l3${category}\`]`——`t` 是函数，用方括号取值得到 `undefined`，React 就渲染空白；历史行的 `t[\`level${row.level}\`]` 同款错误（该处有 `?? row.level` 兜底，所以显示成原始 level）。
+  - **修法**：两处都改为函数调用 `t(...)`；新增回归测试 `the client source calls translate instead of indexing a function`（静态卡住 `t[` 这种写法，并确认 L3 标签与历史 level 都是函数调用）。
+
+### Changed
+
+- **新配置 `quietWhileChildrenActive`（默认 `true`）**：子 agent / teammate 仍在运行时保持静默；设 `false` 可恢复旧行为。可写 `heartbeat.json`（v2）或 `POST /api/heartbeat/config`；本轮未加进设置面板控件。
+
+### Tests
+
+- 新增 3 条：`no pulse while a child subagent is still working`、`manual Beat now still works while a child is working`、`child gate can be disabled by config`。
+- 新增 2 条子会话守卫用例：`a subagent conversation never receives heartbeat context`、`apply never attaches to a subagent conversation`。
+- 新增 1 条 UI 文案回归用例：`the client source calls translate instead of indexing a function`。
+- 全量单测 **122/122 通过**（`node --test`）。
+
 ## [0.6.0] - 2026-10-30
 
 ### Added（自主神经）

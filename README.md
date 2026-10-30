@@ -77,13 +77,14 @@ L3 is a **per-category grant list** — `read` (search / read files), `test` (ru
 What suppresses a pulse before it can speak (all in `lib/gate.js`):
 
 - **you just spoke** (< 2 minutes ago) — the heartbeat defers to you;
+- **a child subagent / teammate is still working** — the root is idle only because it waits for delegated work, so the pulse is recorded as `L0 · child-active` and nothing is injected or compacted (v0.6.1; set `quietWhileChildrenActive: false` to restore the old behaviour);
 - **context pressure > 0.9** — no extra turns near the context limit;
 - **quiet hours** (default `23:00–08:00`, configurable; `null` disables them);
 - **disabled / snoozed / paused**, or `mode: "silent"`;
 - **dedupe**: a signal key already asked inside `dedupeWindowMinutes` (default 90) is dropped;
 - **daily budget**: at most `maxBeatsPerDay` (default 12, `0` = unlimited) delivered beats per calendar day, counted process-wide across sessions.
 
-The one exception is the panel's **Beat now** button: a manual beat skips the politeness gates (quiet hours, budget, dedupe, "user recently spoke") but still picks its level and still checks that the agent has a usable driver surface.
+The one exception is the panel's **Beat now** button: a manual beat skips the politeness gates (quiet hours, budget, dedupe, "user recently spoke", an active child session) but still picks its level and still checks that the agent has a usable driver surface.
 
 ## Task inspection (the snapshot in the message)
 
@@ -167,7 +168,7 @@ The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `str
   - **hot-plug**: `dsh plugin remove` while running turned `/status` from 200 into 401 (route gone, no crash), and `add` brought it back to 200 with the session restored;
   - **control route**: an unknown action returns 400, `snooze` sets `snoozeUntil`, `reset` clears it;
   - the sidebar heart and the `Heartbeat` section render correctly.
-  **Not separately verified on a live host** (unit tests only): event-driven latency (≤10 s), pre-beat compaction, and a real L2 question delivery. The v0.6 autonomy layer is covered by the 116-test suite.
+  **Not separately verified on a live host** (unit tests only): event-driven latency (≤10 s), pre-beat compaction, and a real L2 question delivery. The v0.6 autonomy layer is covered by the 122-test suite.
 
 ## Configuration (v2)
 
@@ -188,6 +189,7 @@ The user config lives in `<dshHome>/heartbeat.json` (written by the panel or by 
 | `jitterSeconds` | `60` | deterministic per-session jitter (0–600 s) so sessions spread out |
 | `restartCooldownSeconds` | `300` | after a restart, stay silent this long even if signals are waiting |
 | `quietHours` | `{"start":"23:00","end":"08:00"}` | never speak inside this window (overnight windows supported; `null` disables) |
+| `quietWhileChildrenActive` | `true` | stay silent (`L0 · child-active`) while a child subagent / teammate session is still working; manual Beat now is the exception (v0.6.1) |
 | `taskNudge` | `true` | include the task snapshot + ask instruction in beats |
 | `taskNudgeMaxItems` | `5` | per-bucket item cap in the task snapshot (1–20) |
 | `l3Allow` | `[]` | granted L3 categories: `read` / `test` / `notes` / `continue` |
@@ -217,15 +219,17 @@ Custom heartbeat prompt (composition config, **no `insert`**, to avoid duplicati
 node --test
 ```
 
-No-arg `node --test` discovers `test/*.test.mjs`; the suite covers `runtime`, `tasks`, `sensors`, `rhythm`, `gate`, `vitals`, `config-store-v2`, `prompt-levels`, `wiring-v06`, `settings-nav-icon` and `client-half` — **116 tests** at the moment.
+No-arg `node --test` discovers `test/*.test.mjs`; the suite covers `runtime`, `tasks`, `sensors`, `rhythm`, `gate`, `vitals`, `config-store-v2`, `prompt-levels`, `wiring-v06`, `settings-nav-icon` and `client-half` — **122 tests** at the moment.
 
 Design and implementation notes live in the repo (not shipped in the npm package): `docs/specs/2026-10-30-heartbeat-v0.6-design.md` and `docs/plans/2026-10-30-heartbeat-v0.6.md`.
 
 ## Known limits
 
 - The heartbeat only exists while the DSH process is alive (it stops when the app quits).
-- Each root agent has its own runtime; subagents never get a heartbeat.
+- Each root agent has its own runtime; **subagent conversations never get a heartbeat** (identity-guarded — see below).
 - **By default the heartbeat is quiet**: if nothing changes, it says nothing. "Presence" now comes from the panel's vitals view and the Beat now button, not from scheduled chatter — raise `mode`/dedupe/quiet settings if you want more voice.
+- **Never speaks over delegated work (v0.6.1)**: while a child subagent / teammate session is running, the root agent is idle only because it is waiting. A heartbeat at that moment would inject a new turn mid-work, and the client presents the running child as part of the active turn — the new turn would hide it, so you could no longer tell that background work is still running (and pre-beat compaction could fold the live turn away). Pulses therefore record `L0 · child-active` and inject nothing until every child settles; **Beat now** still forces one beat.
+- **Never attached to a subagent conversation (v0.6.1)**: teammate / subagent sessions are `mode: "continuable"` children, and a user can re-open or resume one from the sidebar as if it were a top-level chat. Per host semantics such a **resumed child can count as a root** (no owner), which is why `attach()` reads the session's `subagent` projection identity and skips any non-empty one (log `heartbeat: skip subagent session`); a running runtime also checks the identity on every tick and disposes itself if it ever finds it is on a subagent session. Real-host check: all live runtimes were user root sessions, and scanning teammate child-session logs found 0 heartbeat injections (the `plugin:heartbeat` strings in those logs are tool output / doc content, not injected messages). One caveat that is not the plugin's call: **fork-type** subagents inherit the parent's history, so a heartbeat message already present before the fork is carried into the seed — that's fork semantics; spawn-type subagents are unaffected.
 - L3 is **not a sandbox** — it only changes the instruction; irreversible actions are still stopped by host approval.
 - Runtime state (`heartbeat-vitals.json`) is process-local with atomic writes and a short debounce; two DSH processes sharing one home are best-effort, not strongly consistent.
 - Event-driven beats need `sessionProjections.onChanged`; without it the plugin is timer-only (same gating, just less reactive).

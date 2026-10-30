@@ -79,13 +79,14 @@ L3 是一份**按类别授权的清单** —— `read`（检索 / 读文件）�
 开口前会被这些条件抑制（都在 `lib/gate.js`）：
 
 - **你刚说过话**（2 分钟内）—— 让位给人；
+- **子 agent / teammate 还在跑** —— root 只是在等委派出去的工作，本拍记 `L0 · child-active`、不注入、不压缩（v0.6.1；设 `quietWhileChildrenActive: false` 可恢复旧行为）；
 - **上下文压力 > 0.9** —— 接近上下文上限时不额外开轮；
 - **静默时段**（默认 `23:00–08:00`，可配置，`null` 关闭）；
 - **禁用 / 打盹 / 暂停**，或 `mode: "silent"`；
 - **去重**：同一信号键在 `dedupeWindowMinutes`（默认 90）内已经问过 → 丢弃；
 - **每日预算**：每个自然日最多 `maxBeatsPerDay`（默认 12，`0` = 不限）条主动消息，进程内跨会话共享计数。
 
-唯一例外是面板上的 **立即一拍（Beat now）**：手动拍跳过「礼貌闸门」（静默时段、预算、去重、你刚说过话），但仍会做等级判定，也仍要求 agent 真有可用的驱动面。
+唯一例外是面板上的 **立即一拍（Beat now）**：手动拍跳过「礼貌闸门」（静默时段、预算、去重、你刚说过话、子会话正在跑），但仍会做等级判定，也仍要求 agent 真有可用的驱动面。
 
 ## 任务巡检（消息里的快照）
 
@@ -172,7 +173,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
   - **热插拔**：运行中 `dsh plugin remove` 使 `/status` 从 200 变 401（路由消失、无崩溃），`add` 回来恢复 200 且会话恢复；
   - **控制路由**：未知 action 返回 400，`snooze` 让 `snoozeUntil` 生效，`reset` 清零恢复；
   - 侧栏爱心图标与 `Heartbeat` 区块正常渲染。
-  **未单独实机验证**（仅单测覆盖）：事件驱动时延（≤10 秒）、pre-beat 压缩、真实的 L2 提问投递。v0.6 自主层由 116 个单测覆盖。
+  **未单独实机验证**（仅单测覆盖）：事件驱动时延（≤10 秒）、pre-beat 压缩、真实的 L2 提问投递。v0.6 自主层由 122 个单测覆盖。
 
 ## 配置（v2）
 
@@ -193,6 +194,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 | `jitterSeconds` | `60` | 确定性的每会话抖动（0–600 秒），让多个会话错开 |
 | `restartCooldownSeconds` | `300` | 重启后即使有信号也先安静这么久 |
 | `quietHours` | `{"start":"23:00","end":"08:00"}` | 该时段内不开口（支持跨午夜；`null` = 关闭） |
+| `quietWhileChildrenActive` | `true` | 子 agent / teammate 还在跑时保持静默（本拍记 `L0 · child-active`、不注入）；手动「立即一拍」是例外（v0.6.1） |
 | `taskNudge` | `true` | 是否在心跳里带任务快照 + 提问指令 |
 | `taskNudgeMaxItems` | `5` | 任务快照每类条目上限（1–20） |
 | `l3Allow` | `[]` | L3 授权类别：`read` / `test` / `notes` / `continue` |
@@ -227,15 +229,17 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 node --test
 ```
 
-无参 `node --test` 会自动发现 `test/*.test.mjs`；测试覆盖 `runtime`、`tasks`、`sensors`、`rhythm`、`gate`、`vitals`、`config-store-v2`、`prompt-levels`、`wiring-v06`、`settings-nav-icon`、`client-half`，当前共 **116 个用例**。
+无参 `node --test` 会自动发现 `test/*.test.mjs`；测试覆盖 `runtime`、`tasks`、`sensors`、`rhythm`、`gate`、`vitals`、`config-store-v2`、`prompt-levels`、`wiring-v06`、`settings-nav-icon`、`client-half`，当前共 **122 个用例**。
 
 设计与实施记录在仓库里（**不进 npm 包**）：`docs/specs/2026-10-30-heartbeat-v0.6-design.md`、`docs/plans/2026-10-30-heartbeat-v0.6.md`。
 
 ## 已知边界
 
 - 心跳只在 DSH 进程活着时存在（app 关了就停）。
-- 每个 root agent 各自一条 runtime；子 agent 不挂心跳。
+- 每个 root agent 各自一条 runtime；**子 agent 会话永不挂心跳**（按身份守卫，见下）。
 - **默认安静**：没有变化就不说话。存在感现在靠面板的生命体征与「立即一拍」，而不是按点叨叨——想让它更活跃就调 `mode` / 去重 / 静默时段相关配置。
+- **不打断委派工作（v0.6.1）**：子 agent / teammate 在跑时，root 只是因为等它才 idle；此时心跳若开新一轮，会在工作中间插入一条消息——客户端把「正在运行子会话」展示为当前活跃 turn 的一部分，新 turn 会把它顶掉，你就看不出后台还在跑了（pre-beat 压缩还可能把活跃 turn 折进摘要）。所以这类拍只记 `L0 · child-active`、不注入、不压缩，直到子任务全部结束；手动「立即一拍」仍可强制触发。
+- **永不挂到子 agent 会话（v0.6.1）**：teammate / subagent 是 `mode: "continuable"` 的子会话，用户可能从侧栏把它当顶层会话重新打开 / resume；按宿主语义这种 **resumed child 可能被算作 root**（无 owner），所以 `attach()` 会先读该会话的 `subagent` 投影身份，非空就跳过不挂（日志 `heartbeat: skip subagent session`）；运行中的 runtime 也会在每次 tick 复查身份，一旦发现自己是 subagent 会话就 `dispose()` 摘除。真机排查：当前实例 3 个运行时全是 root 用户会话，逐个扫 teammate 子会话日志心跳注入 **0 条**（那些日志里的 `plugin:heartbeat` 字样是工具输出 / 文档内容，不是注入消息）。另有一个不属于插件职责的边界：**fork 型**子 agent 会继承父会话历史，fork 前父会话里已有的心跳消息会随 seed 带过去——这是 fork 语义本身；spawn 型子 agent 不受影响。
 - L3 **不是沙箱**：只改指令；不可逆操作仍由宿主 approval 拦截。
 - 运行态（`heartbeat-vitals.json`）是进程内的，原子写 + 短防抖；两个 DSH 进程共用一个 home 时是「尽力而为」，不是强一致。
 - 事件驱动需要 `sessionProjections.onChanged`；没有该服务时退化为纯定时器模式（门控相同，只是反应没那么快）。

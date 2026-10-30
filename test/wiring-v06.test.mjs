@@ -169,6 +169,21 @@ test('apply catches up with root agents that already exist (hot mount)', async (
   assert.equal(live._cleanups.length, 0)
 })
 
+test('apply never attaches to a subagent conversation', async () => {
+  const agents = registry()
+  const child = new FakeAgent('child-session')
+  agents.add(child)
+  const sessionProjections = {
+    stateOf: (_session, key) => (key === 'subagent' ? { mode: 'continuable', label: 'worker', seq: 1 } : undefined),
+  }
+  const { ctx, listeners } = makeCtx({ agents, services: { webServer: makeWebServer(), sessionProjections } })
+  const dispose = apply(ctx, { ...tmpFiles(), jitterSeconds: 0 })
+  assert.equal(child._cleanups.length, 0, 'subagent session skipped at hot mount')
+  fireCreated(listeners, child)
+  assert.equal(child._cleanups.length, 0, 'subagent session skipped on agent/created')
+  await dispose()
+})
+
 test('apply ignores non-root agents and attaches on agent/created', async () => {
   const agents = registry()
   const root = new FakeAgent('root')
