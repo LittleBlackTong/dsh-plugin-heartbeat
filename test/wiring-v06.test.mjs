@@ -174,13 +174,25 @@ test('apply never attaches to a subagent conversation', async () => {
   const child = new FakeAgent('child-session')
   agents.add(child)
   const sessionProjections = {
-    stateOf: (_session, key) => (key === 'subagent' ? { mode: 'continuable', label: 'worker', seq: 1 } : undefined),
+    // Raw projection state shape: a subagent has `{identity}`, not the wire view.
+    stateOf: (_session, key) => (key === 'subagent' ? { identity: { mode: 'continuable', label: 'worker', seq: 1 } } : {}),
   }
   const { ctx, listeners } = makeCtx({ agents, services: { webServer: makeWebServer(), sessionProjections } })
   const dispose = apply(ctx, { ...tmpFiles(), jitterSeconds: 0 })
   assert.equal(child._cleanups.length, 0, 'subagent session skipped at hot mount')
   fireCreated(listeners, child)
   assert.equal(child._cleanups.length, 0, 'subagent session skipped on agent/created')
+  await dispose()
+})
+
+test('a root session with a raw `{}` subagent state still attaches', async () => {
+  const agents = registry()
+  const root = new FakeAgent('root-raw-state')
+  agents.add(root)
+  const sessionProjections = { stateOf: () => ({}) } // raw state of a normal session
+  const { ctx } = makeCtx({ agents, services: { webServer: makeWebServer(), sessionProjections } })
+  const dispose = apply(ctx, { ...tmpFiles(), jitterSeconds: 0 })
+  assert.equal(root._cleanups.length, 1, 'regression: raw {} must not look like a subagent')
   await dispose()
 })
 
