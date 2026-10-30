@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import {
   claimProactiveLock,
   defaultProactiveLockPath,
+  readProactiveLock,
   DEFAULT_PROACTIVE_COOLDOWN_SECONDS,
   PROACTIVE_LOCK_FILENAME,
   PROACTIVE_LOCK_VERSION,
@@ -84,6 +85,42 @@ test('cooldownSeconds: 0 disables arbitration (claim ok, file untouched)', () =>
   const result = claimProactiveLock({ path, speaker: 'heartbeat', cooldownSeconds: 0, now: NOW })
   assert.deepEqual(result, { ok: true })
   assert.equal(readLock(path).speaker, 'memory', 'a disabled heartbeat never blocks the other speaker')
+})
+
+test('readProactiveLock exposes a valid claim (round-trip with claimProactiveLock)', () => {
+  const path = tmpLock()
+  claimProactiveLock({ path, speaker: 'memory', cooldownSeconds: 180, now: NOW })
+  assert.deepEqual(readProactiveLock(path), { speaker: 'memory', at: NOW })
+})
+
+test('readProactiveLock degrades every unreadable/invalid file to no lock', () => {
+  const missing = tmpLock()
+  assert.equal(readProactiveLock(missing), undefined)
+
+  const corrupt = tmpLock()
+  writeFileSync(corrupt, 'not json at all')
+  assert.equal(readProactiveLock(corrupt), undefined)
+
+  const shapeless = tmpLock()
+  writeLock(shapeless, { speaker: 'memory' })
+  assert.equal(readProactiveLock(shapeless), undefined)
+
+  const zeroAt = tmpLock()
+  writeLock(zeroAt, { speaker: 'memory', at: 0 })
+  assert.equal(readProactiveLock(zeroAt), undefined)
+
+  const emptySpeaker = tmpLock()
+  writeLock(emptySpeaker, { speaker: '', at: NOW })
+  assert.equal(readProactiveLock(emptySpeaker), undefined)
+
+  const array = tmpLock()
+  writeLock(array, [])
+  assert.equal(readProactiveLock(array), undefined)
+
+  // An unreadable target (a directory) must not throw either.
+  const directory = mkdtempSync(join(tmpdir(), 'hb-lock-read-dir-'))
+  assert.doesNotThrow(() => readProactiveLock(directory))
+  assert.equal(readProactiveLock(directory), undefined)
 })
 
 test('the default lock lives next to the other dsh state files', () => {

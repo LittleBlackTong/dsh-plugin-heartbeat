@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/LittleBlackTong/dsh-plugin-heartbeat"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-LittleBlackTong%2Fdsh--plugin--heartbeat-blue?logo=github"></a>
+  <a href="https://github.com/LittleBlackTong/dsh-plugin-heartbeat/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/LittleBlackTong/dsh-plugin-heartbeat/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://www.npmjs.com/package/dsh-plugin-heartbeat"><img alt="npm" src="https://img.shields.io/npm/v/dsh-plugin-heartbeat?logo=npm"></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D18-green">
@@ -142,6 +143,11 @@ v0.5 起每拍可以携带一段任务快照；传感器复用同一批投影，
 
 面板文案走 DSH 自己的语言层：client 半注入 `locale`、注册 `heartbeat` 命名空间的中英语言包，并在 settings section 上声明 `locale: 'heartbeat'`——所以面板**跟随「设置 → 通用设置 → 语言」**，切换 App 语言即时重渲染（不靠浏览器语言猜）。侧栏 label 走同一套语言包（中文「心跳」/ 英文 `Heartbeat`），语言切换后爱心图标的认领会自动重跑，标记始终落在当前那一行。
 
+### 诊断（v0.8.0）
+
+面板能直接回答「它刚才为什么没开口」，不用翻日志：诊断区列出**最近 5 拍**的时间 / 等级 / **原因**（如 `没有新信号`、`静默时段`、`proactive-cooldown（让位给 memory）`、`child-active`），并显示**当前发言权持有者**（来自 status 路由新增的 `lock` 字段）——一眼就能解释一段安静。L3 区也从只显示勾选框改为同时给出「已授权类别」摘要。
+
+
 ## 与其他插件的发言权仲裁（v0.7.0）
 
 同一段对话里可能有多个主动插件都想说话。v0.7 加了一套极小的共享协议，避免两个插件抢话：
@@ -167,7 +173,10 @@ v0.5 起每拍可以携带一段任务快照；传感器复用同一批投影，
 
 **这里规避的已知宿主行为**：DSH 会话列表的 `running` 只在 agent 创建 / 销毁时重算，子会话 `api-session/status` 按 session 资源转发——父会话空闲时，它的视图可能拿不到子会话运行状态的变化，于是头部显示「N 个子智能体」而不是「正在运行」，主会话看起来已完成。
 
-现在插件在 `GET /api/heartbeat/status` 的每个会话上报告 `children: { total, running, runningIds }`（来自 `subagentCatalog` / `agentTeam` 的 wire view 加活 agent registry——和 runtime 保持静默用的是同一份宿主真值），客户端在 `conversation.session.header.actions` 注册头部胶囊 **「子智能体执行中 · N」**，每 5 秒轮询；子任务结束自动隐藏，并跟随 App 语言。**纯插件层，零宿主改动。**
+现在插件在 `GET /api/heartbeat/status` 的每个会话上报告 `children: { total, running, runningIds }`（来自 `subagentCatalog` / `agentTeam` 的 wire view 加活 agent registry——和 runtime 保持静默用的是同一份宿主真值），客户端在 `conversation.session.header.actions` 注册头部胶囊 **「子智能体执行中 · N」**，每 5 秒轮询；子任务结束自动隐藏，并跟随 App 语言。浏览器标签页隐藏时**暂停轮询**，回到前台立即恢复。**纯插件层，零宿主改动。**
+
+![会话头部的子智能体执行中胶囊](assets/session-header.png)
+
 
 ## 安装
 
@@ -194,7 +203,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 - **DSH：官方 0.2.1-rc.5 系列**。`package.json` 已声明 `engines.dsh: "^0.2.1-rc.5"`——宿主用 semver（`includePrerelease: true`）做引擎闸门，注意 prerelease 语义：`^0.2.1` / `>=0.2.0` **都匹配不上** `0.2.1-rc.5`，必须写 `^0.2.1-rc.5` 才认；它同时覆盖将来 0.2.1 正式版，而 0.3.0-rc.1 会被判不兼容。
 - **session format v4**（官方 0.1.7+）。心跳消息的 source 使用 producer-owned kind `plugin:heartbeat`；v4 的原生准入拒绝 v3 的 `{kind:'plugin', plugin:'heartbeat'}` wrapper。v4 与 v3 白名单互斥、无法两全。
 - **0.4.2 是最后一个 v3 兼容版本**；**0.5.0 起只支持官方 DSH 0.2.1-rc.5 系列**。0.3.x 暂不支持。
-- **请用 0.7.0**：已发布的 0.6.1 误读会话投影——`stateOf()` 返回的是原始 state，普通会话的 `subagent` 身份是 `{}`，被判成「这是子会话」→ **心跳完全挂不上**，child-active 闸门也永不生效；0.6.2 修了这个问题，0.7.0 再加发言权仲裁、生理签名与子智能体胶囊。
+- **请用 0.8.0**：已发布的 0.6.1 误读会话投影——`stateOf()` 返回的是原始 state，普通会话的 `subagent` 身份是 `{}`，被判成「这是子会话」→ **心跳完全挂不上**，child-active 闸门也永不生效；0.6.2 修了这个问题，0.7.0 加了发言权仲裁、生理签名与子智能体胶囊，0.8.0 再加诊断面板、面板内可调仲裁/生理签名配置，以及更省电的胶囊轮询。
 - **实机验证**（DSH Desktop 0.2.1-rc.5，重启后加载 v0.6.0 构建）：
   - `GET /api/heartbeat/status` → 200，返回 2 个 live session（含 `sessionId` / `cwd` / `nextBeatAt` / 预算 / history）；`/api/heartbeat/config` 返回 **v2** 配置；
   - 已有的 v1 `heartbeat.json` 自动迁移到 v2（`intervalSeconds` → `baseIntervalSeconds`，新增 mode / 静默时段 / 预算等字段），并自动创建 `heartbeat-vitals.json`；
@@ -202,7 +211,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
   - **热插拔**：运行中 `dsh plugin remove` 使 `/status` 从 200 变 401（路由消失、无崩溃），`add` 回来恢复 200 且会话恢复；
   - **控制路由**：未知 action 返回 400，`snooze` 让 `snoozeUntil` 生效，`reset` 清零恢复；
   - 侧栏爱心图标与 `Heartbeat` 区块正常渲染。
-  **未单独实机验证**（仅单测覆盖）：事件驱动时延（≤10 秒）、pre-beat 压缩、真实的 L2 提问投递。v0.6 自主层由 172 个单测覆盖。
+  **未单独实机验证**（仅单测覆盖）：事件驱动时延（≤10 秒）、pre-beat 压缩、真实的 L2 提问投递。v0.6 自主层由 186 个单测覆盖。
 
 ## 配置（v2）
 
@@ -261,9 +270,9 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 node --test
 ```
 
-无参 `node --test` 会自动发现 `test/*.test.mjs`；测试覆盖 `runtime`、`tasks`、`sensors`、`rhythm`、`gate`、`vitals`、`config-store-v2`、`prompt-levels`、`wiring-v06`、`settings-nav-icon`、`client-half`、`proactive-lock`、`physiology`、`prompt-physiology`、`activity`，当前共 **172 个用例**。
+无参 `node --test` 会自动发现 `test/*.test.mjs`；测试覆盖 `runtime`、`tasks`、`sensors`、`rhythm`、`gate`、`vitals`、`config-store-v2`、`prompt-levels`、`wiring-v06`、`settings-nav-icon`、`client-half`、`proactive-lock`、`physiology`、`prompt-physiology`、`activity`，当前共 **186 个用例**；CI 用 `.github/workflows/ci.yml` 跑同一套。
 
-设计与实施记录在仓库里（**不进 npm 包**）：`docs/specs/2026-10-30-heartbeat-v0.6-design.md`、`docs/plans/2026-10-30-heartbeat-v0.6.md`。
+设计与实施记录在仓库里（**不进 npm 包**）：`docs/specs/2026-10-30-heartbeat-v0.6-design.md`、`docs/plans/2026-10-30-heartbeat-v0.6.md`。跨插件共享发言协议见 [docs/PROACTIVE-PROTOCOL.md](docs/PROACTIVE-PROTOCOL.md)；贡献与安全策略见 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)。
 
 ## 已知边界
 

@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/LittleBlackTong/dsh-plugin-heartbeat"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-LittleBlackTong%2Fdsh--plugin--heartbeat-blue?logo=github"></a>
+  <a href="https://github.com/LittleBlackTong/dsh-plugin-heartbeat/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/LittleBlackTong/dsh-plugin-heartbeat/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://www.npmjs.com/package/dsh-plugin-heartbeat"><img alt="npm" src="https://img.shields.io/npm/v/dsh-plugin-heartbeat?logo=npm"></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D18-green">
@@ -140,6 +141,11 @@ Every control action targets the given `sessionId`, or all live sessions when om
 
 The panel's wording is localised through DSH's own locale layer: the client half injects `locale`, registers a `heartbeat` namespace with zh/en packs and declares `locale: 'heartbeat'` on the settings section, so the panel follows **Settings → General → Language** and re-renders immediately when you switch the app language (it does not guess from the browser). The sidebar label follows the same setting — 中文「心跳」/ English `Heartbeat` — and the heart-icon claim re-runs after a language switch, so the mark always sits on the current row.
 
+### Diagnostics (v0.8.0)
+
+The panel can answer "why didn't it say anything?" without digging through logs: a diagnostics block lists the **last 5 pulses** with time, level and **reason** (e.g. `没有新信号`, `静默时段`, `proactive-cooldown（让位给 memory）`, `child-active`), and shows **who currently holds the speech floor** from the status route's new `lock` field — so a quiet run is explainable at a glance. The L3 section also summarises the granted categories instead of only showing the checkboxes.
+
+
 ## Speech arbitration with other plugins (v0.7.0)
 
 Several proactive plugins may want to speak in the same conversation. v0.7 adds a tiny shared protocol so two of them cannot talk over each other:
@@ -165,7 +171,10 @@ While a background subagent is still running, the conversation header can look f
 
 **Known host behaviour this compensates for**: DSH recomputes a session list's `running` flag only when agents are created or disposed, and forwards child `api-session/status` per session resource — while the parent is idle, its view may not receive the child's run-state change, so the header may show "N sub-agents" instead of "running" and the main conversation appears complete.
 
-The plugin now reports `children: { total, running, runningIds }` per session on `GET /api/heartbeat/status` (from the `subagentCatalog` / `agentTeam` wire views plus the live agent registry — the same host truth the runtime uses to stay silent), and the client registers a header pill **「子智能体执行中 · N」** in `conversation.session.header.actions`, polling every 5 s; it hides automatically once the children settle and follows the app language. **Pure plugin layer — no host change.**
+The plugin now reports `children: { total, running, runningIds }` per session on `GET /api/heartbeat/status` (from the `subagentCatalog` / `agentTeam` wire views plus the live agent registry — the same host truth the runtime uses to stay silent), and the client registers a header pill **「子智能体执行中 · N」** in `conversation.session.header.actions`, polling every 5 s; it hides automatically once the children settle and follows the app language. Polling **pauses while the browser tab is hidden** and resumes immediately when you return. **Pure plugin layer — no host change.**
+
+![Child-activity pill in the session header](assets/session-header.png)
+
 
 ## Install
 
@@ -189,7 +198,7 @@ The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `str
 - **DSH: official 0.2.1-rc.5 series.** `package.json` declares `engines.dsh: "^0.2.1-rc.5"`; the host gates with semver (`includePrerelease: true`), so mind prerelease semantics: `^0.2.1` / `>=0.2.0` **do not match** `0.2.1-rc.5`; only `^0.2.1-rc.5` does. It also covers the eventual 0.2.1 stable, while `0.3.0-rc.1` is judged incompatible.
 - **session format v4** (official 0.1.7+). The heartbeat source uses the producer-owned kind `plugin:heartbeat`; v4's native admission rejects the v3 `{kind:'plugin', plugin:'heartbeat'}` wrapper. The v4 and v3 allowlists are mutually exclusive.
 - **0.4.2 is the last v3-compatible version**; **from 0.5.0 the plugin supports only the official DSH 0.2.1-rc.5 series**. 0.3.x is not supported yet.
-- **Use 0.7.0**: the published 0.6.1 misreads session projections — `stateOf()` returns raw state, so the `subagent` identity `{}` was treated as "this is a subagent" and **no heartbeat attached at all**, while the child-active gate never fired; 0.6.2 fixed that, and 0.7.0 adds speech-right arbitration, the physiology line and the child-activity pill.
+- **Use 0.8.0**: the published 0.6.1 misreads session projections — `stateOf()` returns raw state, so the `subagent` identity `{}` was treated as "this is a subagent" and **no heartbeat attached at all**, while the child-active gate never fired; 0.6.2 fixed that, 0.7.0 added speech-right arbitration, the physiology line and the child-activity pill, and 0.8.0 adds the diagnostics panel, panel controls for the arbitration/physiology keys and a lighter activity pill.
 - **Verified on a real host** (DSH Desktop 0.2.1-rc.5, v0.6.0 build loaded after restart):
   - `GET /api/heartbeat/status` → 200 with both live sessions (`sessionId` / `cwd` / `nextBeatAt` / budget / history), and `/api/heartbeat/config` returns the **v2** config;
   - an existing v1 `heartbeat.json` was migrated automatically (`intervalSeconds` → `baseIntervalSeconds`, plus the new mode / quiet-hours / budget fields) and `heartbeat-vitals.json` was created;
@@ -197,7 +206,7 @@ The settings sidebar entry carries a **stroked heart** mark: a 16×16 grid, `str
   - **hot-plug**: `dsh plugin remove` while running turned `/status` from 200 into 401 (route gone, no crash), and `add` brought it back to 200 with the session restored;
   - **control route**: an unknown action returns 400, `snooze` sets `snoozeUntil`, `reset` clears it;
   - the sidebar heart and the `Heartbeat` section render correctly.
-  **Not separately verified on a live host** (unit tests only): event-driven latency (≤10 s), pre-beat compaction, and a real L2 question delivery. The v0.6 autonomy layer is covered by the 172-test suite.
+  **Not separately verified on a live host** (unit tests only): event-driven latency (≤10 s), pre-beat compaction, and a real L2 question delivery. The v0.6 autonomy layer is covered by the 186-test suite.
 
 ## Configuration (v2)
 
@@ -251,9 +260,9 @@ Custom heartbeat prompt (composition config, **no `insert`**, to avoid duplicati
 node --test
 ```
 
-No-arg `node --test` discovers `test/*.test.mjs`; the suite covers `runtime`, `tasks`, `sensors`, `rhythm`, `gate`, `vitals`, `config-store-v2`, `prompt-levels`, `wiring-v06`, `settings-nav-icon`, `client-half`, `proactive-lock`, `physiology`, `prompt-physiology` and `activity` — **172 tests** at the moment.
+No-arg `node --test` discovers `test/*.test.mjs`; the suite covers `runtime`, `tasks`, `sensors`, `rhythm`, `gate`, `vitals`, `config-store-v2`, `prompt-levels`, `wiring-v06`, `settings-nav-icon`, `client-half`, `proactive-lock`, `physiology`, `prompt-physiology` and `activity` — **186 tests** at the moment; CI runs the same suite via `.github/workflows/ci.yml`.
 
-Design and implementation notes live in the repo (not shipped in the npm package): `docs/specs/2026-10-30-heartbeat-v0.6-design.md` and `docs/plans/2026-10-30-heartbeat-v0.6.md`.
+Design and implementation notes live in the repo (not shipped in the npm package): `docs/specs/2026-10-30-heartbeat-v0.6-design.md` and `docs/plans/2026-10-30-heartbeat-v0.6.md`. The cross-plugin speech-floor protocol is documented publicly in [docs/PROACTIVE-PROTOCOL.md](docs/PROACTIVE-PROTOCOL.md); contrib/security policies are in [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## Known limits
 

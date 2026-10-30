@@ -21,7 +21,7 @@ const NAV_ICON_ATTR = 'data-dsh-heartbeat-nav-icon'
 const CLIENT_SOURCE = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
 /** Build the browser-ish sandbox: rows + styles + observers + module loader. */
-function browserHarness() {
+function browserHarness({ effects = false, visibility = 'visible', status } = {}) {
   const rows = [
     { textContent: 'General' },
     { textContent: 'Memory' },
@@ -39,9 +39,21 @@ function browserHarness() {
 
   const styles = []
   const observers = []
+  const intervals = []
+  const listeners = new Map()
+  const effectCleanups = []
+  let fetchCount = 0
   let registration
   const documentStub = {
     body: {},
+    visibilityState: visibility,
+    addEventListener(type, callback) {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(callback)
+    },
+    removeEventListener(type, callback) {
+      listeners.get(type)?.delete(callback)
+    },
     head: {
       appendChild(node) {
         styles.push(node)
@@ -81,6 +93,19 @@ function browserHarness() {
     document: documentStub,
     MutationObserver: MutationObserverStub,
     console,
+    fetch: () => {
+      fetchCount += 1
+      return Promise.resolve({ ok: true, json: async () => status ?? { sessions: [] } })
+    },
+    setInterval: (callback, ms) => {
+      const handle = { callback, ms }
+      intervals.push(handle)
+      return handle
+    },
+    clearInterval: (handle) => {
+      const index = intervals.indexOf(handle)
+      if (index >= 0) intervals.splice(index, 1)
+    },
   }
   vm.runInContext(CLIENT_SOURCE, vm.createContext(sandbox), { filename: 'lib/client.js' })
   assert.equal(registration.id, 'dsh-plugin-heartbeat', 'client module id must be the package name')
@@ -89,7 +114,12 @@ function browserHarness() {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     Component: class {},
     useState: () => [undefined, () => {}],
-    useEffect: () => {},
+    useEffect: effects
+      ? (callback) => {
+        const cleanup = callback()
+        if (typeof cleanup === 'function') effectCleanups.push(cleanup)
+      }
+      : () => {},
     useRef: () => ({ current: undefined }),
     useCallback: (fn) => fn,
     useMemo: (fn) => fn(),
@@ -98,7 +128,20 @@ function browserHarness() {
     assert.equal(name, 'react', 'the client half may only require the react platform seed')
     return react
   })
-  return { moduleExports, rows, styles, observers }
+  return {
+    moduleExports,
+    rows,
+    styles,
+    observers,
+    document: documentStub,
+    intervals,
+    listeners,
+    effectCleanups,
+    fetchCount: () => fetchCount,
+    fire(type) {
+      for (const callback of [...(listeners.get(type) ?? [])]) callback()
+    },
+  }
 }
 
 /** Run apply() against a fake slots/effect context. */
@@ -242,7 +285,9 @@ test('the client source calls translate instead of indexing a function', () => {
   // lost their category names). Translate lookups must be calls.
   assert.equal(/\bt\[/.test(source), false, 'translate lookups must be t(...) calls, never t[...]')
   assert.ok(source.includes('t(`l3${category}`)'), 'L3 category labels are translated via a call')
-  assert.ok(source.includes('t(`level${row.level}`)'), 'history level labels are translated via a call')
+  // v0.8 moved history rendering into the diagnostics helper; the level label
+  // must still go through a translate call (the 0.5.0 blank-label regression).
+  assert.match(source, /translate\(`level\$\{[^}]+\}`\)/, 'history level labels are translated via a call')
 })
 
 test('activity pill renders nothing when the host reports no running child', () => {
@@ -278,6 +323,148 @@ test('the header pill polls the status route and is translated', () => {
   assert.ok(CLIENT_SOURCE.includes("conversation.session.header.actions"))
   assert.ok(CLIENT_SOURCE.includes('ACTIVITY_POLL_MS'))
   assert.ok(CLIENT_SOURCE.includes('childrenOfStatus'))
+})
+
+test('v0.8 panel wires the three schema keys it used to omit', () => {
+  const { moduleExports } = browserHarness()
+  const { DICTS } = moduleExports.__test
+  const keys = [
+    'proactiveCooldown', 'proactiveCooldownHint', 'proactiveCooldownUnit',
+    'userActiveSuppress', 'userActiveSuppressHint', 'userActiveSuppressUnit',
+    'physiologyLine', 'physiologyLineHint',
+  ]
+  for (const key of keys) {
+    assert.equal(typeof DICTS.zh[key], 'string', `zh.${key} must exist`)
+    assert.equal(typeof DICTS.en[key], 'string', `en.${key} must exist`)
+  }
+  // The panel must post the snake-shaped schema keys, not a prettier alias.
+  assert.ok(CLIENT_SOURCE.includes('apply({ proactiveCooldownSeconds:'), 'proactive cooldown row saves proactiveCooldownSeconds')
+  assert.ok(CLIENT_SOURCE.includes('apply({ userActiveSuppressSeconds:'), 'user-active row saves userActiveSuppressSeconds')
+  assert.ok(CLIENT_SOURCE.includes('apply({ physiologyLine:'), 'physiology row saves physiologyLine')
+  // 0 must stay a legal value in every numeric row (0 = arbitration/suppression off).
+  assert.match(CLIENT_SOURCE, /proactiveCooldownSeconds[\s\S]{0,220}minutes >= 0/, 'proactive cooldown accepts 0')
+  assert.match(CLIENT_SOURCE, /userActiveSuppressSeconds[\s\S]{0,220}seconds >= 0/, 'user-active suppression accepts 0')
+})
+
+test('v0.8 L3 grant summary renders the live grants', () => {
+  const { moduleExports } = browserHarness()
+  const { l3SummaryOf, DICTS } = moduleExports.__test
+  const zh = (key) => DICTS.zh[key]
+  const en = (key) => DICTS.en[key]
+  assert.equal(l3SummaryOf(['read', 'test'], zh), '已授权：读取 / 检索、跑测试 / 构建')
+  assert.equal(l3SummaryOf(['notes'], en), 'Granted: write docs / notes')
+  assert.equal(l3SummaryOf([], zh), '未授权任何类别（默认全关）')
+  assert.equal(l3SummaryOf(undefined, zh), '未授权任何类别（默认全关）')
+  assert.equal(l3SummaryOf(['bogus'], zh), '已授权：bogus', 'unknown categories stay visible instead of being dropped')
+  assert.ok(CLIENT_SOURCE.includes('l3SummaryOf(l3, t)'), 'the L3 row renders the summary from config.l3Allow')
+  assert.ok(CLIENT_SOURCE.includes("t('l3GrantedHint')"), 'the summary keeps the approval hint')
+})
+
+test('v0.8 diagnostics renders recent pulses and the current floor', () => {
+  const { moduleExports } = browserHarness()
+  const { recentPulsesOf, floorTextOf, DICTS } = moduleExports.__test
+  const zh = (key) => DICTS.zh[key]
+  const history = [
+    { at: 1_700_000_000_000, level: 'L0', reason: 'why-0' },
+    { at: 1_700_000_001_000, level: 'L1', reason: 'why-1' },
+    { at: 1_700_000_002_000, level: 'L2', reason: 'why-2' },
+    { at: 1_700_000_003_000, level: 'L4', reason: 'why-3' },
+    { at: 1_700_000_004_000, level: 'L1', reason: 'why-4' },
+    { at: 1_700_000_005_000, level: 'L2', reason: 'why-5' },
+  ]
+  const pulses = recentPulsesOf({ history }, zh)
+  assert.equal(pulses.length, 5, 'only the newest five pulses')
+  assert.deepEqual(Array.from(pulses, (pulse) => pulse.reason), ['why-5', 'why-4', 'why-3', 'why-2', 'why-1'])
+  assert.ok(pulses[0].text.includes(zh('levelL2')), 'level label is translated')
+  assert.ok(pulses[0].text.includes('why-5'), 'reason is shown verbatim (non-i18n allowed)')
+  assert.deepEqual(Array.from(recentPulsesOf({}, zh)), [])
+  assert.deepEqual(Array.from(recentPulsesOf(undefined, zh)), [])
+  // Floor line: heartbeat/memory claim, or idle.
+  assert.equal(floorTextOf(null, zh), '空闲')
+  assert.equal(floorTextOf({ speaker: '', at: 1 }, zh), '空闲')
+  const memory = floorTextOf({ speaker: 'memory', at: 1_700_000_000_000 }, zh)
+  assert.ok(memory.includes('memory') && memory.includes('持有'), `memory floor: ${memory}`)
+  const heartbeat = floorTextOf({ speaker: 'heartbeat', at: 1_700_000_000_000 }, (key) => DICTS.en[key])
+  assert.ok(heartbeat.includes('heartbeat') && heartbeat.includes('holds'), `en floor: ${heartbeat}`)
+  assert.ok(CLIENT_SOURCE.includes("t('diagnostics')"), 'panel renders the diagnostics heading')
+  assert.ok(CLIENT_SOURCE.includes('recentPulsesOf('), 'diagnostics reuses the pulse renderer')
+  assert.ok(CLIENT_SOURCE.includes('floorTextOf('), 'diagnostics renders the current speech floor')
+  // The diagnostics block is one pure composition: hint + newest pulses + floor.
+  const { diagnosticsOf } = moduleExports.__test
+  const diagnostic = diagnosticsOf({ history, lock: { speaker: 'memory', at: 1_700_000_000_000 } }, zh)
+  assert.equal(Array.from(diagnostic.pulses).length, 5)
+  assert.ok(diagnostic.pulses[0].includes('why-5'))
+  assert.equal(diagnostic.empty, false)
+  assert.ok(diagnostic.floor.includes('memory'), `floor names the holder: ${diagnostic.floor}`)
+  assert.ok(diagnostic.floor.startsWith(zh('floorLine').split('{')[0]), 'floor is labelled, not a bare word')
+  const idle = diagnosticsOf({}, zh)
+  assert.equal(idle.empty, true)
+  assert.equal(Array.from(idle.pulses).length, 0)
+  assert.ok(idle.floor.includes(zh('floorIdle')))
+  assert.ok(CLIENT_SOURCE.includes("translate('floorLine')"), 'the floor line is labelled instead of a bare "idle"')
+  assert.ok(CLIENT_SOURCE.includes('diagnosticsOf(session, t)'), 'the panel renders the pure diagnostics composition')
+})
+
+test('v0.8 i18n interpolation is local, never host-provided', () => {
+  const { moduleExports } = browserHarness()
+  const { fill, DICTS } = moduleExports.__test
+  assert.equal(fill('{name} 持有（{when}）', { name: 'memory', when: '12:00' }), 'memory 持有（12:00）')
+  assert.equal(fill('{name} holds ({when})', { name: 'heartbeat', when: '12:00' }), 'heartbeat holds (12:00)')
+  assert.equal(fill('no placeholders'), 'no placeholders')
+  assert.equal(fill('{name} {missing}', { name: 'x' }), 'x {missing}', 'unknown placeholders stay visible')
+  assert.equal(fill(undefined), '')
+  assert.ok(DICTS.zh.floorHeldBy.includes('{name}'), 'zh floor template keeps the {name} placeholder')
+  assert.ok(DICTS.zh.floorHeldBy.includes('{when}'), 'zh floor template keeps the {when} placeholder')
+  assert.ok(DICTS.en.floorHeldBy.includes('{name}'))
+  assert.ok(DICTS.en.floorHeldBy.includes('{when}'))
+})
+
+test('v0.8 renderActivityPill renders nothing unless a child is running', () => {
+  const { moduleExports } = browserHarness()
+  const { renderActivityPill, DICTS } = moduleExports.__test
+  const zh = (key) => DICTS.zh[key]
+  assert.equal(typeof renderActivityPill, 'function')
+  assert.equal(renderActivityPill(null, zh), null)
+  assert.equal(renderActivityPill(undefined, zh), null)
+  assert.equal(renderActivityPill({ total: 2, running: 0 }, zh), null)
+  assert.equal(renderActivityPill({ total: 0, running: 0 }, zh), null)
+})
+
+test('v0.8 renderActivityPill renders the translated running count', () => {
+  const { moduleExports } = browserHarness()
+  const { renderActivityPill, DICTS } = moduleExports.__test
+  const tree = renderActivityPill({ total: 3, running: 2 }, (key) => DICTS.zh[key])
+  assert.equal(tree.type, 'span')
+  assert.equal(tree.props.title, DICTS.zh.activityPillHint)
+  assert.equal(tree.children[1].children[0], '子智能体执行中 · 2')
+  const enTree = renderActivityPill({ total: 3, running: 1 }, (key) => DICTS.en[key])
+  assert.equal(enTree.children[1].children[0], 'subagents working · 1')
+})
+
+test('v0.8 the activity pill pauses polling while the document is hidden', () => {
+  const harness = browserHarness({ effects: true, visibility: 'hidden' })
+  const { ActivityPill, fallbackT } = harness.moduleExports.__test
+  ActivityPill({ sessionId: 'session-1', t: fallbackT })
+  assert.equal(harness.intervals.length, 0, 'hidden at mount: no polling timer')
+  assert.equal(harness.fetchCount(), 0, 'hidden at mount: no status request')
+  assert.equal(harness.listeners.get('visibilitychange')?.size ?? 0, 1, 'visibilitychange is observed')
+  // Tab becomes visible: poll immediately, then every ACTIVITY_POLL_MS.
+  harness.document.visibilityState = 'visible'
+  harness.fire('visibilitychange')
+  assert.equal(harness.intervals.length, 1, 'visible tab resumes polling')
+  assert.equal(harness.intervals[0].ms, 5000, 'the 5s poll interval is preserved')
+  assert.equal(harness.fetchCount(), 1, 'resume polls right away')
+  // Tab hidden again: the timer is cleared, no background churn.
+  harness.document.visibilityState = 'hidden'
+  harness.fire('visibilitychange')
+  assert.equal(harness.intervals.length, 0, 'hidden tab stops polling')
+  // Unmount tears down the listener and any running timer.
+  harness.document.visibilityState = 'visible'
+  harness.fire('visibilitychange')
+  assert.equal(harness.intervals.length, 1)
+  for (const cleanup of harness.effectCleanups) cleanup()
+  assert.equal(harness.intervals.length, 0, 'teardown clears the interval')
+  assert.equal(harness.listeners.get('visibilitychange')?.size ?? 0, 0, 'teardown removes the listener')
 })
 
 test('teardown removes the mark, the stylesheet and the observer', () => {

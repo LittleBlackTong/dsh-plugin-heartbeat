@@ -4,7 +4,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, CONFIG_ROUTE_PATH, STATUS_ROUTE_PATH, CONTROL_ROUTE_PATH } from '../lib/index.js'
@@ -258,6 +258,38 @@ test('status route reports sessions, next ETA and budget', async () => {
   assert.ok(session.nextBeatAt > 0)
   assert.equal(session.budget.max, 12)
   assert.deepEqual(session.history, [])
+  await dispose()
+})
+
+test('v0.8: status route reports the shared proactive floor claim as lock', async () => {
+  const agents = registry()
+  agents.add(new FakeAgent('a'))
+  const web = makeWebServer()
+  const files = tmpFiles()
+  const { ctx } = makeCtx({ agents, services: { webServer: web } })
+  const dispose = apply(ctx, { ...files, jitterSeconds: 0 })
+  const handler = web.routes.get(STATUS_ROUTE_PATH)
+  // No claim file yet: every session reports an idle floor.
+  const idle = await callRoute(handler)
+  assert.equal(idle.body.sessions[0].lock, null)
+  // Another proactive plugin (memory) holds the floor in the shared file.
+  writeFileSync(files.proactiveLockFile, JSON.stringify({ version: 1, speaker: 'memory', at: 1_700_000_000_000 }))
+  const held = await callRoute(handler)
+  assert.deepEqual(held.body.sessions[0].lock, { speaker: 'memory', at: 1_700_000_000_000 })
+  await dispose()
+})
+
+test('v0.8: a corrupt proactive lock file reads as no floor claim', async () => {
+  const agents = registry()
+  agents.add(new FakeAgent('a'))
+  const web = makeWebServer()
+  const files = tmpFiles()
+  writeFileSync(files.proactiveLockFile, 'not json at all')
+  const { ctx } = makeCtx({ agents, services: { webServer: web } })
+  const dispose = apply(ctx, { ...files, jitterSeconds: 0 })
+  const status = await callRoute(web.routes.get(STATUS_ROUTE_PATH))
+  assert.equal(status.status, 200)
+  assert.equal(status.body.sessions[0].lock, null)
   await dispose()
 })
 

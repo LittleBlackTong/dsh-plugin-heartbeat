@@ -2,6 +2,20 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.8.0] - 2026-10-30
+
+### Added（可观测性 + 面板补全 + 工程化）
+
+- **设置面板补全**：新增 `proactiveCooldownSeconds`（按分钟编辑，0 = 关闭）、`userActiveSuppressSeconds`（秒，0 = 不抑制）、`physiologyLine` 三行配置；L3 授权区新增「已授权类别」摘要；新增**诊断区**——最近 5 拍的时间 / 等级 / **原因**（「它刚才为什么没开口」直接在面板回答），以及**当前发言权持有者**（来自 status 新增的 `lock` 字段）。
+- **胶囊轮询更省**：会话头部「子智能体执行中 · N」胶囊在标签页隐藏（`document.visibilityState === 'hidden'`）时**暂停轮询**，回到前台立即恢复；渲染逻辑抽成可测纯函数 `renderActivityPill`。
+- **发言权只读接口**：`lib/proactive-lock.js` 新增 `readProactiveLock(path)`（只读，不 claim、不写，返回 `{ speaker, at }` 或 `undefined`）；`GET /api/heartbeat/status` 每会话新增 `lock` 字段。
+- **工程化**：`.github/workflows/ci.yml`（跑 `node --test`）、Issue / PR 模板、`CONTRIBUTING.md`、`SECURITY.md`、`docs/PROACTIVE-PROTOCOL.md`（跨插件共享发言协议 v1 的公开说明）；`assets/` 两张真实 UI 截图（README 用）。这些**不进 npm 包**（`files` 字段未改）。
+
+### Tests
+
+- `client-half` / `proactive-lock` / `wiring-v06` 扩用例（面板契约、只读接口、status `lock` 字段）；新增 `test/panel-render.test.mjs`（vm + 极简 hooks 真实渲染 `HeartbeatSection`，断言三个新配置行 / L3 已授权摘要 / 诊断区落进输出）。
+- 全量单测 **186/186 通过**（`node --test`）。
+
 ## [0.7.0] - 2026-10-30
 
 ### Added（A 仲裁 + B 生理签名 + C 子智能体胶囊）
