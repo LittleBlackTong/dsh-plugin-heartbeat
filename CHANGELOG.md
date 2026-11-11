@@ -2,6 +2,18 @@
 
 所有记录跟随 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；版本号与 `package.json` 保持一致。
 
+## [0.8.1] - 2026-11-12
+
+### Fixed（DSH 0.2.2-rc.2 兼容 + 配置健壮性）
+
+- **rc.2 下开启插件后无法新建会话（根因）**：DSH 0.2.2-rc.2 把 `ctx.agents.roots()` 换成了 `ctx.agents.list()`，而 `agent/created` 是 **serial 事件**——旧代码在监听器/热挂载 catch-up 里调用 `roots()` 抛 TypeError，会让 **agent 注册被拒绝**，于是每个新会话都建不起来。现改为兼容读取（`roots()` 优先、失败回退 `list()`、都不可用返回 `[]`，全程 try/catch），四个关键路径（attach、`agent/created` 监听器、热挂载 catch-up）都不会再抛错；`engines.dsh` 扩为 `^0.2.1-rc.5 || ^0.2.2-rc.2`，老版本宿主行为不变。
+- **`quietHours: null` 真正生效**：schemastery 会把显式 `null` 归一成默认夜间静默；配置 store 现在在构造 base 与 `update()` 两处保留用户「关闭静默时段」的选择。
+- **测试时间无关化**：`projection changes wake a runtime through noteSignal` 不再依赖 mock timers / 真实时钟（显式关闭静默与重启冷却、真实等待），凌晨跑也不再假红。
+
+### Tests
+
+- 全量单测 **186/186 通过**。
+
 ## [0.8.0] - 2026-10-30
 
 ### Added（可观测性 + 面板补全 + 工程化）

@@ -204,7 +204,7 @@ dsh plugin --profile <profile> add dsh-plugin-heartbeat
 
 ## 版本要求
 
-- **DSH：官方 0.2.1-rc.5 系列**。`package.json` 已声明 `engines.dsh: "^0.2.1-rc.5"`——宿主用 semver（`includePrerelease: true`）做引擎闸门，注意 prerelease 语义：`^0.2.1` / `>=0.2.0` **都匹配不上** `0.2.1-rc.5`，必须写 `^0.2.1-rc.5` 才认；它同时覆盖将来 0.2.1 正式版，而 0.3.0-rc.1 会被判不兼容。
+- **DSH：0.2.1-rc.5 … 0.2.2-rc.2 双向兼容**。`package.json` 声明 `engines.dsh: "^0.2.1-rc.5 || ^0.2.2-rc.2"`，宿主用 semver（`includePrerelease: true`）做引擎闸门。**在 DSH 0.2.2-rc.2 上必须升级到 0.8.1+**：rc.2 把 `ctx.agents.roots()` 换成了 `agents.list()`，旧调用在 serial 的 `agent/created` 监听器里抛错会**拒绝 agent 注册**——表现就是**开启插件后无法新建会话**。0.8.1 改为兼容读取（优先 `roots()`、回退 `list()`、绝不抛错），所有监听器加异常保护，老宿主行为不变；升级后需完全重启 DSH。
 - **session format v4**（官方 0.1.7+）。心跳消息的 source 使用 producer-owned kind `plugin:heartbeat`；v4 的原生准入拒绝 v3 的 `{kind:'plugin', plugin:'heartbeat'}` wrapper。v4 与 v3 白名单互斥、无法两全。
 - **0.4.2 是最后一个 v3 兼容版本**；**0.5.0 起只支持官方 DSH 0.2.1-rc.5 系列**。0.3.x 暂不支持。
 - **请用 0.8.0**：已发布的 0.6.1 误读会话投影——`stateOf()` 返回的是原始 state，普通会话的 `subagent` 身份是 `{}`，被判成「这是子会话」→ **心跳完全挂不上**，child-active 闸门也永不生效；0.6.2 修了这个问题，0.7.0 加了发言权仲裁、生理签名与子智能体胶囊，0.8.0 再加诊断面板、面板内可调仲裁/生理签名配置，以及更省电的胶囊轮询。

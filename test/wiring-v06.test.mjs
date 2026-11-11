@@ -314,8 +314,7 @@ test('control route supports beat-now, snooze and rejects unknown actions', asyn
   await dispose()
 })
 
-test('projection changes wake a runtime through noteSignal', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+test('projection changes wake a runtime through noteSignal', async () => {
   const agents = registry()
   const agent = new FakeAgent('a')
   agents.add(agent)
@@ -332,10 +331,10 @@ test('projection changes wake a runtime through noteSignal', async (t) => {
   const files = tmpFiles()
   const web = makeWebServer()
   const { ctx } = makeCtx({ agents, services: { webServer: web, sessionProjections } })
-  const dispose = apply(ctx, { ...files, jitterSeconds: 0, taskNudge: false, baseIntervalSeconds: 3600 })
+  const dispose = apply(ctx, { ...files, jitterSeconds: 0, taskNudge: false, baseIntervalSeconds: 3600, quietHours: null, restartCooldownSeconds: 0 })
   assert.equal(listeners.length, 1)
   listeners[0](agent.session, 'agentTeam')
-  t.mock.timers.tick(2_000)
+  await new Promise((resolve) => setTimeout(resolve, 2200))
   assert.equal(agent.followed.length, 1, 'projection change produced a pulse')
   // v0.7: the pulse claimed the shared proactive floor in the configured file,
   // never the real `~/.dsh/proactive-cooldown.json`.
